@@ -23,7 +23,7 @@ const NOTE =
   "Datos de Google Safe Browsing (uso no comercial).";
 
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": "https://verifica-correos.netlify.app",
   "Access-Control-Allow-Headers": "Content-Type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
@@ -63,7 +63,11 @@ exports.handler = async function (event) {
   try {
     body = JSON.parse(event.body || "{}");
   } catch {
-    return { statusCode: 400, headers: CORS_HEADERS, body: "JSON inválido" };
+    return {
+      statusCode: 400,
+      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify({ error: "JSON inválido" }),
+    };
   }
 
   // Aceptar url (singular) o urls (array)
@@ -81,27 +85,37 @@ exports.handler = async function (event) {
     };
   }
 
-  // Limitar a 500 URLs por llamada (límite de la API)
+  // Limitar a 500 URLs por llamada (límite de la API de Google)
   const batch = urls.slice(0, 500);
+  const truncated = urls.length > 500;
 
   // ---------------------------------------------------------------------------
-  // Consulta a Google Safe Browsing
+  // Consulta a Google Safe Browsing (con timeout de 10 s)
   // ---------------------------------------------------------------------------
   let matches = [];
   try {
-    const gsb = await fetch(`${GSB_ENDPOINT}?key=${API_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client: { clientId: "verifica-correos", clientVersion: "1.0.0" },
-        threatInfo: {
-          threatTypes: THREAT_TYPES,
-          platformTypes: ["ANY_PLATFORM"],
-          threatEntryTypes: ["URL"],
-          threatEntries: batch.map((u) => ({ url: u })),
-        },
-      }),
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10_000);
+
+    let gsb;
+    try {
+      gsb = await fetch(`${GSB_ENDPOINT}?key=${API_KEY}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          client: { clientId: "verifica-correos", clientVersion: "1.0.0" },
+          threatInfo: {
+            threatTypes: THREAT_TYPES,
+            platformTypes: ["ANY_PLATFORM"],
+            threatEntryTypes: ["URL"],
+            threatEntries: batch.map((u) => ({ url: u })),
+          },
+        }),
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (!gsb.ok) {
       const errText = await gsb.text();
@@ -133,11 +147,15 @@ exports.handler = async function (event) {
 
   const anyDangerous = results.some((r) => r.verdict === "dangerous");
 
+  const note = truncated
+    ? `${NOTE} Solo se verificaron las primeras 500 de ${urls.length} URLs enviadas.`
+    : NOTE;
+
   return respond({
     verdict: anyDangerous ? "dangerous" : "safe",
     results,
     source: "google_safe_browsing",
-    note: NOTE,
+    note,
   });
 };
 

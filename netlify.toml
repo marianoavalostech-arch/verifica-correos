@@ -11,6 +11,9 @@
   publish  = "."               # index.html está en la raíz
   functions = "netlify/functions"
 
+[build.environment]
+  NODE_VERSION = "18"          # fetch nativo disponible desde Node 18
+
 [functions]
   node_bundler = "esbuild"     # bundler rápido, soporta ESM
 

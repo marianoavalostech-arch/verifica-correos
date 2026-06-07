@@ -33,12 +33,19 @@ CLIENT_VERSION = "0.1.0"
 
 app = FastAPI(title="Verificador de Phishing", version="0.1.0")
 
-# CORS: permite que el frontend (servido desde otro origen/puerto) llame
-# a este backend. En la Fase 1, durante desarrollo local, permitimos todo.
-# Cuando despliegues, restringe esto al dominio real de tu frontend.
+# CORS: restringe los origenes permitidos al frontend real y a los
+# entornos de desarrollo local habituales.
+ALLOWED_ORIGINS = [
+    "https://verifica-correos.netlify.app",
+    "http://localhost:8888",   # Netlify Dev local
+    "http://127.0.0.1:8888",
+    "http://localhost:5500",   # Live Server / VS Code
+    "http://127.0.0.1:5500",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
