@@ -1,45 +1,43 @@
 """
-Verificador de Phishing - Fase 1
-Backend FastAPI con una sola fuente: Google Safe Browsing v4.
+Verificador de Phishing — backend FastAPI local
+Fuentes (consultadas en paralelo):
+  1. URLhaus / abuse.ch  — libre, sin clave
+  2. Google Safe Browsing v4 — requiere GOOGLE_SAFE_BROWSING_KEY
+  3. VirusTotal v3            — requiere VIRUSTOTAL_API_KEY (opcional)
 
-Flujo: el frontend envia una URL -> este backend la consulta contra
-Google Safe Browsing -> devuelve un veredicto en JSON.
-
-IMPORTANTE: la consulta a Google se hace desde el servidor, nunca desde
-el navegador del usuario. Asi el navegador de quien usa la herramienta
-nunca toca el sitio sospechoso.
+NUNCA el navegador del usuario toca el sitio sospechoso.
 """
 
+import asyncio
+import base64
 import os
+
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# ---------------------------------------------------------------------------
-# Configuracion
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────
+# Configuración
+# ─────────────────────────────────────────────────────────────────
 
-# La API key se lee de una variable de entorno. NUNCA la escribas
-# directamente en el codigo ni la subas a un repositorio publico.
-GOOGLE_API_KEY = os.environ.get("GOOGLE_SAFE_BROWSING_KEY", "")
+GOOGLE_API_KEY     = os.environ.get("GOOGLE_SAFE_BROWSING_KEY", "")
+VIRUSTOTAL_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY", "")
 
-SAFE_BROWSING_URL = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
+GSB_ENDPOINT       = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
+URLHAUS_URL        = "https://urlhaus-api.abuse.ch/v1/url/"
+VIRUSTOTAL_BASE    = "https://www.virustotal.com/api/v3/urls"
 
-# Datos que identifican tu cliente ante Google (para sus logs).
-# Pon aqui el nombre de tu proyecto cuando lo despliegues.
-CLIENT_ID = "verificador-phishing"
-CLIENT_VERSION = "0.1.0"
+CLIENT_ID          = "verificador-phishing"
+CLIENT_VERSION     = "0.2.0"
 
-app = FastAPI(title="Verificador de Phishing", version="0.1.0")
+app = FastAPI(title="Verificador de Phishing", version="0.2.0")
 
-# CORS: restringe los origenes permitidos al frontend real y a los
-# entornos de desarrollo local habituales.
 ALLOWED_ORIGINS = [
     "https://verifica-correos.netlify.app",
-    "http://localhost:8888",   # Netlify Dev local
+    "http://localhost:8888",
     "http://127.0.0.1:8888",
-    "http://localhost:5500",   # Live Server / VS Code
+    "http://localhost:5500",
     "http://127.0.0.1:5500",
 ]
 
@@ -50,116 +48,192 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ---------------------------------------------------------------------------
-# Modelos de datos (validacion automatica de FastAPI)
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────
+# Modelos
+# ─────────────────────────────────────────────────────────────────
 
 class CheckRequest(BaseModel):
-    url: str
+    url:  str | None = None          # una sola URL
+    urls: list[str] | None = None    # varias URLs (desde el cuerpo del email)
+
+
+class UrlResult(BaseModel):
+    url:     str
+    verdict: str        # "safe" | "dangerous"
+    threats: list[str]
 
 
 class CheckResponse(BaseModel):
-    url: str
-    verdict: str          # "safe" | "dangerous" | "unknown"
-    threats: list[str]    # tipos de amenaza detectados por Google
-    source: str           # de donde viene el veredicto
-    note: str             # aviso obligatorio (lenguaje calificativo)
+    verdict: str        # veredicto global
+    results: list[UrlResult]
+    source:  str
+    note:    str
 
 
-# ---------------------------------------------------------------------------
-# Logica de consulta a Google Safe Browsing
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────
+# Funciones de consulta por fuente
+# ─────────────────────────────────────────────────────────────────
 
-async def query_safe_browsing(url: str) -> dict:
-    """
-    Consulta una URL contra las listas de Google Safe Browsing.
-    Devuelve un dict con la lista de amenazas encontradas (vacia si esta limpia).
-    """
+async def query_gsb(urls: list[str]) -> dict[str, list[str]]:
+    """Google Safe Browsing v4 (batch) → {url: [threatType, …]}."""
+    if not GOOGLE_API_KEY:
+        return {}
     payload = {
-        "client": {
-            "clientId": CLIENT_ID,
-            "clientVersion": CLIENT_VERSION,
-        },
+        "client": {"clientId": CLIENT_ID, "clientVersion": CLIENT_VERSION},
         "threatInfo": {
             "threatTypes": [
                 "MALWARE",
-                "SOCIAL_ENGINEERING",      # esto cubre phishing
+                "SOCIAL_ENGINEERING",
                 "UNWANTED_SOFTWARE",
                 "POTENTIALLY_HARMFUL_APPLICATION",
             ],
-            "platformTypes": ["ANY_PLATFORM"],
+            "platformTypes":    ["ANY_PLATFORM"],
             "threatEntryTypes": ["URL"],
-            "threatEntries": [{"url": url}],
+            "threatEntries":    [{"url": u} for u in urls],
         },
     }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                GSB_ENDPOINT, params={"key": GOOGLE_API_KEY}, json=payload
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        return {}
 
-    params = {"key": GOOGLE_API_KEY}
-
-    # timeout para que una API lenta no cuelgue tu servidor
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(SAFE_BROWSING_URL, params=params, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-
-    # Si Google no encuentra nada, devuelve un objeto vacio {}.
-    # Si encuentra amenazas, devuelve {"matches": [...]}.
-    matches = data.get("matches", [])
-    threat_types = [m.get("threatType", "DESCONOCIDO") for m in matches]
-    return {"threats": threat_types}
+    hits: dict[str, list[str]] = {}
+    for m in data.get("matches", []):
+        u = m.get("threat", {}).get("url", "")
+        hits.setdefault(u, []).append(m.get("threatType", "UNKNOWN"))
+    return hits
 
 
-# ---------------------------------------------------------------------------
+async def query_urlhaus(url: str) -> list[str]:
+    """URLhaus (abuse.ch) — base de datos abierta, sin clave."""
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                URLHAUS_URL,
+                data={"url": url},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        return []
+
+    if (data.get("query_status") or "no_results") == "no_results":
+        return []
+
+    raw = (data.get("threat") or "malware").lower()
+    mapping = {
+        "malware_download": "URLHAUS_MALWARE",
+        "botnet_cc":        "URLHAUS_BOTNET",
+        "phishing":         "URLHAUS_PHISHING",
+    }
+    return [mapping.get(raw, "URLHAUS_MALWARE")]
+
+
+async def query_virustotal(url: str) -> list[str]:
+    """VirusTotal v3 — requiere VIRUSTOTAL_API_KEY."""
+    if not VIRUSTOTAL_API_KEY:
+        return []
+    url_id = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.get(
+                f"{VIRUSTOTAL_BASE}/{url_id}",
+                headers={"x-apikey": VIRUSTOTAL_API_KEY},
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        return []
+
+    stats      = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+    malicious  = stats.get("malicious", 0)
+    suspicious = stats.get("suspicious", 0)
+    if malicious  >= 2: return ["VIRUSTOTAL_MALICIOSO"]
+    if suspicious >= 3: return ["VIRUSTOTAL_SOSPECHOSO"]
+    return []
+
+
+# ─────────────────────────────────────────────────────────────────
+# Verificación combinada por URL
+# ─────────────────────────────────────────────────────────────────
+
+async def check_single(url: str, gsb_hits: dict[str, list[str]]) -> UrlResult:
+    """Combina resultados de URLhaus + VirusTotal + GSB para una URL."""
+    uh_threats, vt_threats = await asyncio.gather(
+        query_urlhaus(url),
+        query_virustotal(url),
+    )
+    threats = [*gsb_hits.get(url, []), *uh_threats, *vt_threats]
+    return UrlResult(
+        url=url,
+        verdict="dangerous" if threats else "safe",
+        threats=threats,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
 # Endpoints
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
-    """Endpoint simple para comprobar que el servidor esta vivo."""
-    return {"status": "ok", "api_key_configured": bool(GOOGLE_API_KEY)}
+    return {
+        "status": "ok",
+        "sources": {
+            "google_safe_browsing": bool(GOOGLE_API_KEY),
+            "urlhaus":              True,
+            "virustotal":           bool(VIRUSTOTAL_API_KEY),
+        },
+    }
 
 
 @app.post("/check", response_model=CheckResponse)
-async def check_url(req: CheckRequest):
-    """
-    Recibe una URL y devuelve un veredicto basado en Google Safe Browsing.
-    """
-    url = req.url.strip()
+async def check(req: CheckRequest):
+    # Normalizar y deduplicar URLs
+    urls: list[str] = []
+    if req.url:
+        urls.append(req.url.strip())
+    if req.urls:
+        urls.extend(u.strip() for u in req.urls if u.strip())
+    urls = list(dict.fromkeys(urls))
 
-    # Aviso obligatorio: las advertencias deben usar lenguaje calificativo.
+    if not urls:
+        return CheckResponse(
+            verdict="unknown", results=[], source="ninguna",
+            note="No se proporcionó ninguna URL.",
+        )
+
+    # Fuentes activas
+    active_sources = ["URLhaus"]
+    if GOOGLE_API_KEY:
+        active_sources.insert(0, "Google Safe Browsing")
+    if VIRUSTOTAL_API_KEY:
+        active_sources.append("VirusTotal")
+
+    # GSB en batch + URLhaus/VT en paralelo por URL
+    gsb_hits = await query_gsb(urls)
+    results  = await asyncio.gather(*[check_single(u, gsb_hits) for u in urls])
+
+    any_dangerous = any(r.verdict == "dangerous" for r in results)
+    source_str    = " + ".join(active_sources)
+
     note = (
-        "Resultado orientativo. Ninguna herramienta detecta el 100% de las "
-        "amenazas: un sitio puede ser peligroso aunque aparezca como limpio. "
-        "Datos de Google Safe Browsing."
+        f"Resultado orientativo. Fuentes consultadas: {source_str}. "
+        "Ninguna herramienta detecta el 100 % de las amenazas: "
+        "un correo puede ser peligroso aunque aparezca como limpio."
     )
 
-    if not GOOGLE_API_KEY:
-        return CheckResponse(
-            url=url,
-            verdict="unknown",
-            threats=[],
-            source="ninguna",
-            note="Falta configurar la API key de Google Safe Browsing en el servidor.",
-        )
-
-    try:
-        result = await query_safe_browsing(url)
-    except httpx.HTTPError:
-        return CheckResponse(
-            url=url,
-            verdict="unknown",
-            threats=[],
-            source="google_safe_browsing",
-            note="No se pudo consultar Google Safe Browsing en este momento.",
-        )
-
-    threats = result["threats"]
-    verdict = "dangerous" if threats else "safe"
-
     return CheckResponse(
-        url=url,
-        verdict=verdict,
-        threats=threats,
-        source="google_safe_browsing",
+        verdict="dangerous" if any_dangerous else "safe",
+        results=list(results),
+        source=source_str,
         note=note,
     )

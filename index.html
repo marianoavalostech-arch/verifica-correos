@@ -469,9 +469,13 @@
   <!-- ── Footer ── -->
   <div class="footer">
     Protección orientativa &mdash; los falsos negativos son posibles.<br>
-    Fuentes:
+    Fuentes del servidor:
     <a href="https://safebrowsing.google.com" target="_blank" rel="noopener noreferrer">Google Safe Browsing</a>
-    &middot; <a href="https://cloudflare-dns.com" target="_blank" rel="noopener noreferrer">Cloudflare DNS</a>
+    &middot; <a href="https://urlhaus.abuse.ch" target="_blank" rel="noopener noreferrer">URLhaus (abuse.ch)</a>
+    &middot; <a href="https://www.virustotal.com" target="_blank" rel="noopener noreferrer">VirusTotal</a> (opcional)<br>
+    Fuentes del navegador:
+    <a href="https://cloudflare-dns.com" target="_blank" rel="noopener noreferrer">Cloudflare DNS</a>
+    &middot; <a href="https://rdap.org" target="_blank" rel="noopener noreferrer">RDAP</a>
     &middot; análisis heurístico propio<br>
     <a href="https://github.com/profemarianoavalos/verifica-correos" target="_blank" rel="noopener noreferrer">Ver código en GitHub</a>
   </div>
@@ -488,7 +492,7 @@ const CHECK_ENDPOINT = "/check";
 const STD_NOTE =
   "Resultado orientativo. Ninguna herramienta detecta el 100 % de las amenazas. " +
   "Un correo puede ser peligroso aunque aparezca como limpio. " +
-  "Datos de Google Safe Browsing (uso no comercial).";
+  "Fuentes: Google Safe Browsing, URLhaus (abuse.ch) y análisis heurístico propio.";
 
 const COMMON_DOMAINS = [
   "gmail.com","googlemail.com","hotmail.com","hotmail.es","hotmail.com.ar",
@@ -498,9 +502,15 @@ const COMMON_DOMAINS = [
 ];
 
 const SUSPICIOUS_TLDS = new Set([
-  "tk","ml","ga","cf","gq","xyz","top","click","work","loan",
-  "stream","gdn","racing","trade","review","science","date",
-  "faith","bid","win","party","download","accountant",
+  // Freenom gratuitos (muy abusados para phishing)
+  "tk","ml","ga","cf","gq",
+  // Genéricos baratos y abusados
+  "xyz","top","click","work","loan","stream","gdn","racing",
+  "trade","review","science","date","faith","bid","win","party",
+  "download","accountant",
+  // Nuevos gTLDs con alto índice de abuso
+  "zip","mov","cam","icu","vip","buzz","cyou","cfd","sbs",
+  "hair","uno","monster","rest","pw","cc","su","ws",
 ]);
 
 const URL_SHORTENERS = new Set([
@@ -508,13 +518,25 @@ const URL_SHORTENERS = new Set([
   "cutt.ly","rb.gy","is.gd","v.gd","buff.ly","bl.ink","rebrand.ly",
   "link.tl","tiny.cc","clck.ru","soo.gd","shrinkme.io","shorturl.at",
   "adf.ly","bc.vc","s.id","qr.io","short.io",
+  // Acortadores adicionales frecuentemente usados en phishing
+  "x.co","su.pr","snip.ly","mcaf.ee","po.st","hyperurl.co",
+  "lnnk.in","zpr.io","go2l.ink","tr.im","cli.gs","1url.com",
+  "urlo.ws","2url.net","multiurl.com","chilp.it",
 ]);
 
 const THREAT_LABELS = {
-  MALWARE:                         "Malware",
-  SOCIAL_ENGINEERING:              "Phishing / Ingeniería social",
-  UNWANTED_SOFTWARE:               "Software no deseado",
-  POTENTIALLY_HARMFUL_APPLICATION: "App potencialmente dañina",
+  // Google Safe Browsing
+  MALWARE:                         "Malware (Google Safe Browsing)",
+  SOCIAL_ENGINEERING:              "Phishing / Ingeniería social (Google)",
+  UNWANTED_SOFTWARE:               "Software no deseado (Google)",
+  POTENTIALLY_HARMFUL_APPLICATION: "App potencialmente dañina (Google)",
+  // URLhaus / abuse.ch
+  URLHAUS_MALWARE:                 "Malware (URLhaus)",
+  URLHAUS_BOTNET:                  "Botnet C2 (URLhaus)",
+  URLHAUS_PHISHING:                "Phishing (URLhaus)",
+  // VirusTotal
+  VIRUSTOTAL_MALICIOSO:            "Malicioso por múltiples motores (VirusTotal)",
+  VIRUSTOTAL_SOSPECHOSO:           "Sospechoso por múltiples motores (VirusTotal)",
 };
 
 // Reglas heurísticas para el cuerpo del correo
@@ -582,12 +604,52 @@ const BODY_RULES = [
     score: 10,
     extractNames: true,
     patterns: [
+      // Globales
       /\bpaypal\b/i, /\bnetflix\b/i, /\bamazon\b/i, /\bapple\b/i,
       /\bmicrosoft\b/i, /\bgoogle\b/i, /\bfacebook\b/i, /\binstagram\b/i,
-      /\bbanco\b/i, /\bbbva\b/i, /\bsantander\b/i,
-      /\bmercadopago\b/i, /\bdhl\b/i, /\bfedex\b/i,
+      /\bwhatsapp\b/i, /\btelegram\b/i, /\btwitter\b/i, /\btiktok\b/i,
+      /\blinkedin\b/i, /\bdropbox\b/i,
+      /\bdhl\b/i, /\bfedex\b/i, /\bups\b/i,
+      // Bancos / fintech
+      /\bbbva\b/i, /\bsantander\b/i, /\bhsbc\b/i, /\bicbc\b/i,
+      /\bcitibank\b/i, /\bnaci[oó]n\b/i, /\bgalicia\b/i,
+      /\bprovincia\b/i, /\bnaranja(?:x)?\b/i, /\bbrubank\b/i, /\buala\b/i,
+      // Pagos / comercio
+      /\bmercadopago\b/i, /\bmercadolibre\b/i, /\bpedidosya\b/i, /\brappi\b/i,
+      // Organismos / telecos
+      /\bafip\b/i, /\banses\b/i, /\bpami\b/i,
+      /\bmovistar\b/i, /\bclaro\b/i, /\bpersonal\b/i, /\bfibertel\b/i,
+      // Correos / logística
+      /\bcorreoargentino\b/i, /\bandreani\b/i,
     ],
     desc: (names) => `Menciona marcas reconocidas: ${names.join(", ")}. Verifica que el remitente use el dominio oficial.`,
+  },
+  // ── Reglas adicionales ──────────────────────────────────────────
+  {
+    id: "reembolso",
+    label: "Promesa de reembolso o pago pendiente",
+    score: 25,
+    patterns: [
+      /reembolso/i, /devoluci[oó]n de dinero/i, /te? acreditaremos/i,
+      /pago pendiente/i, /tienes (?:un )?(?:pago|cobro)/i,
+      /cobrar[aá]s?/i, /dinero (?:disponible|pendiente|acreditado)/i,
+      /\$\s*[\d,.]+\s*(?:pesos|usd|d[oó]lares)/i,
+    ],
+    desc: () => "Promete reembolsos o pagos pendientes como anzuelo para que entres a un enlace.",
+  },
+  {
+    id: "verificacion",
+    label: "Solicitud de verificación de cuenta",
+    score: 30,
+    patterns: [
+      /verifi(?:car|que|ca) (?:su|tu)/i, /confirme (?:su|tu)/i,
+      /actualice? (?:sus?|tu) datos/i, /datos (?:est[aá]n )?desactualizados/i,
+      /valide? (?:su|tu)/i, /por razones? de seguridad/i,
+      /problema (?:con|en) (?:su|tu) cuenta/i,
+      /acceso (?:inusual|sospechoso|no autorizado)/i,
+      /inicio de sesi[oó]n (?:inusual|sospechoso)/i,
+    ],
+    desc: () => "Solicita verificar o actualizar datos de cuenta — táctica central de phishing.",
   },
 ];
 
@@ -670,6 +732,36 @@ async function dnsHasMX(domain) {
   } catch { return null; }
 }
 
+/**
+ * Consulta la antigüedad del dominio vía RDAP (rdap.org bootstrap).
+ * Devuelve la edad en días, o null si no se puede determinar.
+ */
+async function rdapDomainAge(domain) {
+  try {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), 8000);
+    let resp;
+    try {
+      resp = await fetch(
+        `https://rdap.org/domain/${encodeURIComponent(domain)}`,
+        { signal: ctrl.signal }
+      );
+    } finally {
+      clearTimeout(tid);
+    }
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const regEvent = (data.events || []).find(
+      (e) => e.eventAction === "registration"
+    );
+    if (!regEvent?.eventDate) return null;
+    const ageDays = Math.floor(
+      (Date.now() - new Date(regEvent.eventDate).getTime()) / 86_400_000
+    );
+    return ageDays;
+  } catch { return null; }
+}
+
 // ═══════════════════════════════════════════════════════
 //  Analizadores
 // ═══════════════════════════════════════════════════════
@@ -719,7 +811,18 @@ async function analyzeSender(raw) {
     score += 20;
   }
 
-  const mx = await dnsHasMX(domain);
+  // Detectar Punycode / ataque de homógrafo
+  if (domain.includes("xn--")) {
+    issues.push("El dominio usa codificación Punycode — posible ataque de homógrafo (caracteres visualmente idénticos al dominio real).");
+    score += 30;
+  }
+
+  // Consultar MX y antigüedad en paralelo para ahorrar tiempo
+  const [mx, domainAge] = await Promise.all([
+    dnsHasMX(domain),
+    rdapDomainAge(domain),
+  ]);
+
   let mxText;
   if (mx === true) {
     mxText = "Registros MX encontrados";
@@ -729,6 +832,26 @@ async function analyzeSender(raw) {
     score += 50;
   } else {
     mxText = "No se pudo consultar";
+  }
+
+  let ageText = "No se pudo consultar";
+  if (domainAge !== null) {
+    if (domainAge < 30) {
+      ageText = `${domainAge} días ⚠`;
+      issues.push(`Dominio registrado hace solo ${domainAge} día${domainAge === 1 ? "" : "s"} — los dominios de phishing suelen ser muy recientes.`);
+      score += 40;
+    } else if (domainAge < 180) {
+      const m = Math.floor(domainAge / 30);
+      ageText = `~${m} mes${m === 1 ? "" : "es"} ⚠`;
+      issues.push(`El dominio fue registrado hace menos de 6 meses (${domainAge} días), inusual para entidades legítimas.`);
+      score += 15;
+    } else {
+      const years = Math.floor(domainAge / 365);
+      const months = Math.floor((domainAge % 365) / 30);
+      ageText = years > 0
+        ? `${years} año${years > 1 ? "s" : ""}`
+        : `${months} mes${months !== 1 ? "es" : ""}`;
+    }
   }
 
   score = Math.min(score, 100);
@@ -741,10 +864,11 @@ async function analyzeSender(raw) {
   return {
     state, email, headline, issues, score,
     stats: [
-      ["Local",    local],
-      ["Dominio",  domain],
-      ["TLD",      "." + tld],
-      ["DNS / MX", mxText],
+      ["Local",       local],
+      ["Dominio",     domain],
+      ["TLD",         "." + tld],
+      ["DNS / MX",    mxText],
+      ["Antigüedad",  ageText],
     ],
   };
 }
@@ -1096,7 +1220,6 @@ function buildUrlSection(urlResult, allUrls, shorteners) {
       ${results.map(r => {
         const isShortener = shorteners.includes(r.url);
         let cls, verdictText;
-
         if (r.verdict === "dangerous") {
           cls = "url-danger";
           const threats = (r.threats || []).map(t => THREAT_LABELS[t] || t).join(", ");
@@ -1111,12 +1234,16 @@ function buildUrlSection(urlResult, allUrls, shorteners) {
           cls = "url-unknown";
           verdictText = "? Sin verificar";
         }
-
         return `<div class="url-item ${cls}">
                   <div class="url-text">${esc(r.url)}</div>
                   <div class="url-verdict">${esc(verdictText)}</div>
                 </div>`;
       }).join("")}
+      ${urlResult?.source ? `
+        <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                    margin-top:10px;letter-spacing:.3px">
+          Fuentes consultadas: ${esc(urlResult.source)}
+        </div>` : ""}
       ${!urlResult && results.length > 0 ? `
         <div style="font-size:12px;color:var(--muted);margin-top:8px">
           No se pudo contactar con el servidor de verificación.
