@@ -1,0 +1,21 @@
+# Secretos - NUNCA subir
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+.netlify/
+
+# Python (desarrollo local alternativo)
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
