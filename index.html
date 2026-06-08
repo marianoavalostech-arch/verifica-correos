@@ -1242,10 +1242,13 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, all
     urlState = urlResult.verdict === "dangerous" ? "danger"
              : urlResult.verdict === "safe"      ? "safe"
              :                                     "warn";
-  } else if (spoofedUrls && spoofedUrls.size > 0) {
-    urlState = "danger";
   } else if (shorteners.length > 0 || (trackerInfo && trackerInfo.size > 0)) {
     urlState = "warn";
+  }
+  // La suplantación via @ es siempre peligrosa, sin importar lo que diga la API.
+  // Se aplica DESPUÉS del bloque anterior para sobreescribir cualquier veredicto previo.
+  if (spoofedUrls && spoofedUrls.size > 0) {
+    urlState = "danger";
   }
 
   const states = [senderState, subjectState, bodyState, urlState].filter(Boolean);
