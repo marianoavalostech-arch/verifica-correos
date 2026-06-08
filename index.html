@@ -1245,8 +1245,12 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, all
   } else if (shorteners.length > 0 || (trackerInfo && trackerInfo.size > 0)) {
     urlState = "warn";
   }
-  // La suplantación via @ es siempre peligrosa, sin importar lo que diga la API.
-  // Se aplica DESPUÉS del bloque anterior para sobreescribir cualquier veredicto previo.
+  // Trackers y acortadores ocultan el destino real → el banner nunca puede quedar en "safe".
+  // Se aplica después del bloque de API para degradar "safe" a "warn" cuando corresponde.
+  if (urlState === "safe" && (shorteners.length > 0 || (trackerInfo && trackerInfo.size > 0))) {
+    urlState = "warn";
+  }
+  // Suplantación via @: siempre peligrosa, sobreescribe cualquier veredicto previo.
   if (spoofedUrls && spoofedUrls.size > 0) {
     urlState = "danger";
   }
