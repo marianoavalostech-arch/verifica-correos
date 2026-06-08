@@ -4,7 +4,9 @@
 #   1. Sube este repositorio a GitHub.
 #   2. En Netlify → "Import from Git" → selecciona el repo.
 #   3. En Site settings → Environment variables, añade:
-#      GOOGLE_SAFE_BROWSING_KEY = <tu clave>
+#      GOOGLE_SAFE_BROWSING_KEY = <tu clave>          (obligatoria)
+#      VIRUSTOTAL_API_KEY       = <tu clave>          (opcional — amplía cobertura)
+#      ALLOWED_ORIGIN           = https://tu-sitio.netlify.app  (opcional — restringe CORS)
 #   4. Haz redeploy.
 
 [build]
