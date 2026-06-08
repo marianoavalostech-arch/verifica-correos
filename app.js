@@ -76,6 +76,10 @@ const THREAT_LABELS = {
   // VirusTotal
   VIRUSTOTAL_MALICIOSO:            "Malicioso por múltiples motores (VirusTotal)",
   VIRUSTOTAL_SOSPECHOSO:           "Sospechoso por múltiples motores (VirusTotal)",
+  // ThreatFox / abuse.ch
+  THREATFOX_MALWARE:               "Distribución de malware (ThreatFox)",
+  THREATFOX_BOTNET:                "Infraestructura de botnet C2 (ThreatFox)",
+  THREATFOX_PHISHING:              "Phishing (ThreatFox)",
 };
 
 // Reglas heurísticas para el cuerpo del correo
@@ -349,6 +353,42 @@ async function dnsHasMX(domain) {
 }
 
 /**
+ * Verifica si el dominio tiene registro SPF en sus TXT.
+ * SPF (Sender Policy Framework) indica qué servidores están autorizados
+ * a enviar correo en nombre del dominio.
+ */
+async function dnsHasSPF(domain) {
+  try {
+    const r = await fetch(
+      `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(domain)}&type=TXT`,
+      { headers: { Accept: "application/dns-json" } }
+    );
+    const d = await r.json();
+    return Array.isArray(d.Answer) && d.Answer.some(
+      (rec) => typeof rec.data === "string" && rec.data.includes("v=spf1")
+    );
+  } catch { return null; }
+}
+
+/**
+ * Verifica si el dominio tiene política DMARC en _dmarc.<domain>.
+ * DMARC instruye a los servidores receptores cómo tratar correos
+ * que no superan las validaciones SPF/DKIM.
+ */
+async function dnsHasDMARC(domain) {
+  try {
+    const r = await fetch(
+      `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent("_dmarc." + domain)}&type=TXT`,
+      { headers: { Accept: "application/dns-json" } }
+    );
+    const d = await r.json();
+    return Array.isArray(d.Answer) && d.Answer.some(
+      (rec) => typeof rec.data === "string" && rec.data.includes("v=DMARC1")
+    );
+  } catch { return null; }
+}
+
+/**
  * Consulta la antigüedad del dominio vía RDAP (rdap.org bootstrap).
  * Devuelve la edad en días, o null si no se puede determinar.
  */
@@ -434,10 +474,12 @@ async function analyzeSender(raw) {
     score += 30;
   }
 
-  // Consultar MX y antigüedad en paralelo para ahorrar tiempo
-  const [mx, domainAge] = await Promise.all([
+  // Consultar MX, SPF, DMARC y antigüedad en paralelo para ahorrar tiempo
+  const [mx, domainAge, spf, dmarc] = await Promise.all([
     dnsHasMX(domain),
     rdapDomainAge(domain),
+    dnsHasSPF(domain),
+    dnsHasDMARC(domain),
   ]);
 
   let mxText;
@@ -471,6 +513,28 @@ async function analyzeSender(raw) {
     }
   }
 
+  let spfText;
+  if (spf === true) {
+    spfText = "Registro SPF encontrado";
+  } else if (spf === false) {
+    spfText = "Sin registro SPF ⚠";
+    issues.push("El dominio no tiene registro SPF — cualquiera puede enviar correos suplantándolo.");
+    score += 20;
+  } else {
+    spfText = "No se pudo consultar";
+  }
+
+  let dmarcText;
+  if (dmarc === true) {
+    dmarcText = "Política DMARC encontrada";
+  } else if (dmarc === false) {
+    dmarcText = "Sin política DMARC ⚠";
+    issues.push("El dominio no tiene política DMARC — los correos falsos que lo suplantan no son rechazados automáticamente.");
+    score += 15;
+  } else {
+    dmarcText = "No se pudo consultar";
+  }
+
   score = Math.min(score, 100);
   const state = score >= 50 ? "danger" : score > 0 ? "warn" : "safe";
   const headline =
@@ -485,6 +549,8 @@ async function analyzeSender(raw) {
       ["Dominio",     domain],
       ["TLD",         "." + tld],
       ["DNS / MX",    mxText],
+      ["SPF",         spfText],
+      ["DMARC",       dmarcText],
       ["Antigüedad",  ageText],
     ],
   };

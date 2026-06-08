@@ -3,8 +3,9 @@
  *
  * Fuentes de verificación (consultadas en paralelo):
  *   1. URLhaus / abuse.ch        — libre, sin clave de API
- *   2. Google Safe Browsing v4   — requiere GOOGLE_SAFE_BROWSING_KEY
- *   3. VirusTotal v3             — requiere VIRUSTOTAL_API_KEY (opcional)
+ *   2. ThreatFox / abuse.ch      — libre, sin clave de API
+ *   3. Google Safe Browsing v4   — requiere GOOGLE_SAFE_BROWSING_KEY
+ *   4. VirusTotal v3             — requiere VIRUSTOTAL_API_KEY (opcional)
  *
  * Recibe { url } o { urls: [...] }
  * Devuelve { verdict, results, source, note }
@@ -14,6 +15,7 @@
 
 const GSB_ENDPOINT    = "https://safebrowsing.googleapis.com/v4/threatMatches:find";
 const URLHAUS_URL     = "https://urlhaus-api.abuse.ch/v1/url/";
+const THREATFOX_URL   = "https://threatfox-api.abuse.ch/api/v1/";
 const VIRUSTOTAL_BASE = "https://www.virustotal.com/api/v3/urls";
 
 const GSB_THREAT_TYPES = [
@@ -62,7 +64,7 @@ async function queryGSB(urls, apiKey) {
       }),
     });
     if (!resp.ok) {
-      console.error("GSB error:", resp.status); // No loggar el body: puede contener detalles de la clave
+      console.error("GSB error:", resp.status);
       return [];
     }
     const data = await resp.json();
@@ -77,8 +79,7 @@ async function queryGSB(urls, apiKey) {
 
 /**
  * URLhaus (abuse.ch) — base de datos abierta de URLs maliciosas.
- * CORRECCIÓN: verificar query_status === "is_listed" en vez de !== "no_results"
- * para evitar falsos positivos con estados "not_listed" y "404".
+ * Verificar query_status === "is_listed" para evitar falsos positivos.
  */
 async function queryUrlhaus(url) {
   const ctrl = new AbortController();
@@ -112,8 +113,50 @@ async function queryUrlhaus(url) {
 }
 
 /**
+ * ThreatFox (abuse.ch) — base de datos de IOCs (dominios e IPs maliciosas).
+ * Consulta por hostname extraído de la URL, sin clave de API.
+ * Cubre infraestructura de C2, distribución de malware y phishing.
+ */
+async function queryThreatFox(url) {
+  let hostname;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return [];
+  }
+
+  const ctrl = new AbortController();
+  const tid  = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const resp = await fetch(THREATFOX_URL, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ query: "search_ioc", search_term: hostname }),
+      signal:  ctrl.signal,
+    });
+    if (!resp.ok) return [];
+    const data = await resp.json();
+
+    // "no_results" significa dominio limpio en la base de datos.
+    if ((data.query_status ?? "no_results") !== "ok") return [];
+    if (!Array.isArray(data.data) || data.data.length === 0) return [];
+
+    const map = {
+      botnet_cc:        "THREATFOX_BOTNET",
+      payload_delivery: "THREATFOX_MALWARE",
+      phishing:         "THREATFOX_PHISHING",
+    };
+    const threatType = data.data[0]?.threat_type ?? "";
+    return [map[threatType] ?? "THREATFOX_MALWARE"];
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
+/**
  * VirusTotal v3 — mas de 90 motores antivirus.
- * CORRECCIÓN: .toString("base64url") ya omite padding; el .replace() era redundante.
  */
 async function queryVirusTotal(url, apiKey) {
   if (!apiKey) return [];
@@ -203,15 +246,16 @@ exports.handler = async function (event) {
   const GSB_KEY = process.env.GOOGLE_SAFE_BROWSING_KEY || "";
   const VT_KEY  = (useVT && process.env.VIRUSTOTAL_API_KEY) || "";
 
-  const activeSources = ["URLhaus"];
+  const activeSources = ["URLhaus", "ThreatFox"];
   if (GSB_KEY) activeSources.unshift("Google Safe Browsing");
   if (VT_KEY)  activeSources.push("VirusTotal");
 
-  const [gsbMatches, urlhausAll, vtAll] = await Promise.all([
+  const [gsbMatches, urlhausAll, threatfoxAll, vtAll] = await Promise.all([
     GSB_KEY
       ? queryGSB(batch, GSB_KEY)
       : Promise.resolve([]),
     Promise.all(batch.map((u) => queryUrlhaus(u))),
+    Promise.all(batch.map((u) => queryThreatFox(u))),
     Promise.all(batch.map((u) => queryVirusTotal(u, VT_KEY))),
   ]);
 
@@ -222,8 +266,9 @@ exports.handler = async function (event) {
 
     const threats = [
       ...gsbThreats,
-      ...(urlhausAll[i] || []),
-      ...(vtAll[i]      || []),
+      ...(urlhausAll[i]   || []),
+      ...(threatfoxAll[i] || []),
+      ...(vtAll[i]        || []),
     ];
 
     return {
