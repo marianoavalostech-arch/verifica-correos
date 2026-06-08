@@ -19,3 +19,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Documentos internos — no publicar
+AUDITORIA_SEGURIDAD.md
