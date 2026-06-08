@@ -255,6 +255,17 @@ exports.handler = async function (event) {
   });
 };
 
+// --- Rate limiting (plan gratuito: hasta 2 reglas por proyecto) ---
+// 20 requests/min por IP ≈ protege la cuota diaria de Google Safe Browsing (~10 000 req/día).
+exports.config = {
+  path: "/check",
+  rateLimit: {
+    windowLimit: 20,
+    windowSize: 60,
+    aggregateBy: ["ip", "domain"],
+  },
+};
+
 // --- Helper ---
 function respond(body) {
   return {
