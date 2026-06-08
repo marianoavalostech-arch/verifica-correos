@@ -9,7 +9,7 @@
  * Recibe { url } o { urls: [...] }
  * Devuelve { verdict, results, source, note }
  *
- * Endpoint: /.netlify/functions/check  →  alias /check (netlify.toml)
+ * Endpoint: /.netlify/functions/check  ->  alias /check (netlify.toml)
  */
 
 const GSB_ENDPOINT    = "https://safebrowsing.googleapis.com/v4/threatMatches:find";
@@ -18,28 +18,22 @@ const VIRUSTOTAL_BASE = "https://www.virustotal.com/api/v3/urls";
 
 const GSB_THREAT_TYPES = [
   "MALWARE",
-  "SOCIAL_ENGINEERING",          // cubre phishing
+  "SOCIAL_ENGINEERING",
   "UNWANTED_SOFTWARE",
   "POTENTIALLY_HARMFUL_APPLICATION",
 ];
 
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "https://verifica-correos.netlify.app",
+  "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGIN || "*",
   "Access-Control-Allow-Headers": "Content-Type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// ─────────────────────────────────────────────────────────────────
-// Funciones de consulta por fuente
-// ─────────────────────────────────────────────────────────────────
+// --- Funciones de consulta por fuente ---
 
-/**
- * Google Safe Browsing v4 — consulta en lote
- * Devuelve el array "matches" crudo de la API.
- */
 async function queryGSB(urls, apiKey) {
   const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), 10_000);
+  const tid  = setTimeout(() => ctrl.abort(), 10000);
   try {
     const resp = await fetch(`${GSB_ENDPOINT}?key=${apiKey}`, {
       method: "POST",
@@ -71,11 +65,12 @@ async function queryGSB(urls, apiKey) {
 
 /**
  * URLhaus (abuse.ch) — base de datos abierta de URLs maliciosas.
- * Libre, sin clave. Devuelve un array de etiquetas de amenaza.
+ * CORRECCIÓN: verificar query_status === "is_listed" en vez de !== "no_results"
+ * para evitar falsos positivos con estados "not_listed" y "404".
  */
 async function queryUrlhaus(url) {
   const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), 8_000);
+  const tid  = setTimeout(() => ctrl.abort(), 8000);
   try {
     const resp = await fetch(URLHAUS_URL, {
       method: "POST",
@@ -86,8 +81,9 @@ async function queryUrlhaus(url) {
     if (!resp.ok) return [];
     const data = await resp.json();
 
-    // "no_results" = URL desconocida; cualquier otro valor = está en la BD
-    if ((data.query_status ?? "no_results") === "no_results") return [];
+    // Solo "is_listed" confirma que la URL esta en la base de datos.
+    // Otros estados posibles: "no_results", "not_listed", "404" -> URL limpia.
+    if ((data.query_status ?? "no_results") !== "is_listed") return [];
 
     const raw = (data.threat || "malware").toLowerCase();
     const map = {
@@ -104,27 +100,24 @@ async function queryUrlhaus(url) {
 }
 
 /**
- * VirusTotal v3 — más de 90 motores antivirus.
- * Requiere apiKey; devuelve [] si la clave no está configurada o
- * si la URL aún no fue analizada.
+ * VirusTotal v3 — mas de 90 motores antivirus.
+ * CORRECCIÓN: .toString("base64url") ya omite padding; el .replace() era redundante.
  */
 async function queryVirusTotal(url, apiKey) {
   if (!apiKey) return [];
 
-  // El ID de una URL en VT es su base64url sin padding
-  const urlId = Buffer.from(url).toString("base64url").replace(/=+$/, "");
+  const urlId = Buffer.from(url).toString("base64url");
   const ctrl  = new AbortController();
-  const tid   = setTimeout(() => ctrl.abort(), 12_000);
+  const tid   = setTimeout(() => ctrl.abort(), 12000);
   try {
     const resp = await fetch(`${VIRUSTOTAL_BASE}/${urlId}`, {
       headers: { "x-apikey": apiKey },
       signal:  ctrl.signal,
     });
-    if (resp.status === 404) return [];   // URL no analizada aún → no es señal
+    if (resp.status === 404) return [];
     if (!resp.ok) return [];
     const data  = await resp.json();
     const stats = data?.data?.attributes?.last_analysis_stats ?? {};
-    // Umbral conservador: ≥2 motores "malicious" o ≥3 "suspicious"
     if ((stats.malicious  ?? 0) >= 2) return ["VIRUSTOTAL_MALICIOSO"];
     if ((stats.suspicious ?? 0) >= 3) return ["VIRUSTOTAL_SOSPECHOSO"];
     return [];
@@ -135,12 +128,9 @@ async function queryVirusTotal(url, apiKey) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Handler principal
-// ─────────────────────────────────────────────────────────────────
+// --- Handler principal ---
 
 exports.handler = async function (event) {
-  // Preflight CORS
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: CORS_HEADERS };
   }
@@ -152,7 +142,6 @@ exports.handler = async function (event) {
     };
   }
 
-  // Parsear cuerpo JSON
   let body;
   try {
     body = JSON.parse(event.body || "{}");
@@ -160,11 +149,10 @@ exports.handler = async function (event) {
     return {
       statusCode: 400,
       headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "JSON inválido" }),
+      body: JSON.stringify({ error: "JSON invalido" }),
     };
   }
 
-  // Aceptar { url } (singular) o { urls: [...] }
   const urls = Array.isArray(body.urls)
     ? body.urls.filter(Boolean)
     : body.url
@@ -179,20 +167,16 @@ exports.handler = async function (event) {
     };
   }
 
-  // Limitar a 500 URLs por llamada (límite de la API de Google)
   const batch     = urls.slice(0, 500);
   const truncated = urls.length > 500;
 
-  // Credenciales (variables de entorno en Netlify)
   const GSB_KEY = process.env.GOOGLE_SAFE_BROWSING_KEY || "";
   const VT_KEY  = process.env.VIRUSTOTAL_API_KEY       || "";
 
-  // Fuentes activas para la nota al pie
   const activeSources = ["URLhaus"];
   if (GSB_KEY) activeSources.unshift("Google Safe Browsing");
   if (VT_KEY)  activeSources.push("VirusTotal");
 
-  // ── Consultar todas las fuentes en paralelo ──────────────────
   const [gsbMatches, urlhausAll, vtAll] = await Promise.all([
     GSB_KEY
       ? queryGSB(batch, GSB_KEY)
@@ -201,7 +185,6 @@ exports.handler = async function (event) {
     Promise.all(batch.map((u) => queryVirusTotal(u, VT_KEY))),
   ]);
 
-  // ── Combinar resultados por URL ───────────────────────────────
   const results = batch.map((url, i) => {
     const gsbThreats = gsbMatches
       .filter((m) => m.threat?.url === url)
@@ -224,15 +207,14 @@ exports.handler = async function (event) {
   const sourceStr    = activeSources.join(" + ");
 
   let note =
-    `Resultado orientativo. Fuentes consultadas: ${sourceStr}. ` +
+    "Resultado orientativo. Fuentes consultadas: " + sourceStr + ". " +
     "Ninguna herramienta detecta el 100 % de las amenazas: " +
     "un correo puede ser peligroso aunque aparezca como limpio.";
   if (truncated) {
-    note += ` Solo se verificaron las primeras 500 de ${urls.length} URLs.`;
+    note += " Solo se verificaron las primeras 500 de " + urls.length + " URLs.";
   }
   if (!GSB_KEY && !VT_KEY) {
-    note +=
-      " Para mayor cobertura, configura GOOGLE_SAFE_BROWSING_KEY y/o VIRUSTOTAL_API_KEY.";
+    note += " Para mayor cobertura, configura GOOGLE_SAFE_BROWSING_KEY y/o VIRUSTOTAL_API_KEY.";
   }
 
   return respond({
@@ -243,9 +225,7 @@ exports.handler = async function (event) {
   });
 };
 
-// ─────────────────────────────────────────────────────────────────
-// Helper
-// ─────────────────────────────────────────────────────────────────
+// --- Helper ---
 function respond(body) {
   return {
     statusCode: 200,

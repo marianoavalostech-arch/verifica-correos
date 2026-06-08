@@ -794,7 +794,8 @@ async function analyzeSender(raw) {
 
   let typoOf = null;
   for (const d of COMMON_DOMAINS) {
-    if (levenshtein(domain, d) > 0 && levenshtein(domain, d) <= 2) { typoOf = d; break; }
+    const dist = levenshtein(domain, d);
+    if (dist > 0 && dist <= 2) { typoOf = d; break; }
   }
   if (typoOf) {
     issues.push(`"${domain}" es muy similar a "${typoOf}" — posible dominio falso (typosquatting).`);
@@ -889,10 +890,10 @@ function analyzeSubject(text) {
     score += 20;
   }
 
-  // Palabras en mayúsculas (3+ letras, al menos 2 palabras)
+  // Palabras en mayúsculas (3+ letras, solo letras en mayúsculas — excluye números y símbolos)
   const words = text.split(/\s+/);
   const capsWords = words.filter(w =>
-    w.length >= 3 && w === w.toUpperCase() && /[A-ZÁÉÍÓÚÑÜ]/.test(w)
+    w.length >= 3 && /^[A-ZÁÉÍÓÚÑÜ]+$/.test(w)
   );
   if (capsWords.length >= 2) {
     issues.push(`Palabras en mayúsculas: "${capsWords.slice(0, 3).join('", "')}" — táctica para crear alarma.`);
