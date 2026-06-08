@@ -6,7 +6,7 @@
 #   3. En Site settings → Environment variables, añade:
 #      GOOGLE_SAFE_BROWSING_KEY = <tu clave>          (obligatoria)
 #      VIRUSTOTAL_API_KEY       = <tu clave>          (opcional — amplía cobertura)
-#      ALLOWED_ORIGIN           = https://tu-sitio.netlify.app  (opcional — restringe CORS)
+#      ALLOWED_ORIGIN           = https://tu-sitio.netlify.app  (OBLIGATORIA en producción)
 #   4. Haz redeploy.
 
 [build]
@@ -34,4 +34,4 @@
     X-Content-Type-Options     = "nosniff"
     Referrer-Policy            = "no-referrer"
     Permissions-Policy         = "geolocation=(), microphone=(), camera=()"
-    Content-Security-Policy    = "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self' https://cloudflare-dns.com https://rdap.org https:; font-src https://fonts.gstatic.com;"
+    Content-Security-Policy    = "default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://cloudflare-dns.com https://rdap.org; img-src 'self' data:; frame-ancestors 'none'"

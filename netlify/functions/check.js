@@ -23,11 +23,22 @@ const GSB_THREAT_TYPES = [
   "POTENTIALLY_HARMFUL_APPLICATION",
 ];
 
+// SEGURIDAD: ALLOWED_ORIGIN debe configurarse en producción.
+// Sin ella, cualquier sitio puede llamar a este endpoint y abusar de las API keys.
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
+
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGIN || "*",
+  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
   "Access-Control-Allow-Headers": "Content-Type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
+
+// Solo se aceptan URLs con protocolo http(s) y longitud razonable.
+const VALID_URL_RE = /^https?:\/\/.{3,2000}$/;
+
+// Límite de URLs por llamada y tamaño máximo del body (bytes).
+const MAX_URLS      = 100;
+const MAX_BODY_SIZE = 50_000;
 
 // --- Funciones de consulta por fuente ---
 
@@ -35,9 +46,10 @@ async function queryGSB(urls, apiKey) {
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), 10000);
   try {
-    const resp = await fetch(`${GSB_ENDPOINT}?key=${apiKey}`, {
+    // SEGURIDAD: la clave viaja en el header, no en la URL (evita exposición en logs).
+    const resp = await fetch(GSB_ENDPOINT, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       signal: ctrl.signal,
       body: JSON.stringify({
         client: { clientId: "verifica-correos", clientVersion: "1.1.0" },
@@ -50,7 +62,7 @@ async function queryGSB(urls, apiKey) {
       }),
     });
     if (!resp.ok) {
-      console.error("GSB error:", resp.status, await resp.text());
+      console.error("GSB error:", resp.status); // No loggar el body: puede contener detalles de la clave
       return [];
     }
     const data = await resp.json();
@@ -142,6 +154,15 @@ exports.handler = async function (event) {
     };
   }
 
+  // SEGURIDAD: rechazar payloads excesivamente grandes antes de parsear.
+  if ((event.body || "").length > MAX_BODY_SIZE) {
+    return {
+      statusCode: 413,
+      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify({ error: "Payload demasiado grande" }),
+    };
+  }
+
   let body;
   try {
     body = JSON.parse(event.body || "{}");
@@ -153,22 +174,27 @@ exports.handler = async function (event) {
     };
   }
 
-  const urls = Array.isArray(body.urls)
+  const rawUrls = Array.isArray(body.urls)
     ? body.urls.filter(Boolean)
     : body.url
     ? [body.url]
     : [];
 
+  // SEGURIDAD: filtrar solo URLs con protocolo http/https y longitud razonable.
+  const urls = rawUrls.filter(
+    (u) => typeof u === "string" && VALID_URL_RE.test(u)
+  );
+
   if (urls.length === 0) {
     return {
       statusCode: 400,
       headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "Se requiere el campo url o urls" }),
+      body: JSON.stringify({ error: "Se requiere el campo url o urls (con protocolo http/https)" }),
     };
   }
 
-  const batch     = urls.slice(0, 500);
-  const truncated = urls.length > 500;
+  const batch     = urls.slice(0, MAX_URLS);
+  const truncated = urls.length > MAX_URLS;
 
   // useVT: el cliente puede deshabilitar VirusTotal aunque la clave esté configurada.
   // Por defecto true para mantener compatibilidad con llamadas sin el campo.
@@ -215,7 +241,7 @@ exports.handler = async function (event) {
     "Ninguna herramienta detecta el 100 % de las amenazas: " +
     "un correo puede ser peligroso aunque aparezca como limpio.";
   if (truncated) {
-    note += " Solo se verificaron las primeras 500 de " + urls.length + " URLs.";
+    note += " Solo se verificaron las primeras " + MAX_URLS + " de " + urls.length + " URLs.";
   }
   if (!GSB_KEY && !VT_KEY) {
     note += " Para mayor cobertura, configura GOOGLE_SAFE_BROWSING_KEY y/o VIRUSTOTAL_API_KEY.";
