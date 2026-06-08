@@ -179,6 +179,8 @@
       font-weight: 700;
       font-size: 15px;
       cursor: pointer;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
       transition: transform .1s, opacity .2s;
       margin-top: 8px;
       display: flex;
@@ -216,9 +218,12 @@
       font-family: var(--sans);
       font-size: 12px;
       cursor: pointer;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
       transition: color .15s, border-color .15s;
     }
     .btn-secondary:hover { color: var(--text); border-color: var(--muted); }
+    .btn-secondary:active { color: var(--text); border-color: var(--muted); }
 
     /* ── Resultados ── */
     #results { margin-top: 24px; }
