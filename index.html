@@ -131,6 +131,53 @@
       background: var(--border);
     }
 
+    /* ── Toggle VirusTotal ── */
+    .vt-toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+      cursor: pointer;
+      width: fit-content;
+    }
+    .vt-toggle input[type="checkbox"] {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg);
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background .15s, border-color .15s;
+      position: relative;
+    }
+    .vt-toggle input[type="checkbox"]:checked {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    .vt-toggle input[type="checkbox"]:checked::after {
+      content: '';
+      position: absolute;
+      left: 4px; top: 1px;
+      width: 5px; height: 9px;
+      border: 2px solid #07120c;
+      border-top: none;
+      border-left: none;
+      transform: rotate(45deg);
+    }
+    .vt-toggle-label {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.4;
+      user-select: none;
+    }
+    .vt-toggle-label strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+
     /* ── Botones ── */
     .analyze-btn {
       width: 100%;
@@ -453,6 +500,14 @@
       autocomplete="off" spellcheck="false">
   </div>
 
+  <!-- ── Toggle VirusTotal ── -->
+  <label class="vt-toggle" for="vtToggle">
+    <input type="checkbox" id="vtToggle">
+    <span class="vt-toggle-label">
+      <strong>Consultar VirusTotal</strong> — 90+ motores antivirus (más lento, opcional)
+    </span>
+  </label>
+
   <button class="analyze-btn" id="analyzeBtn">
     <span class="btn-spinner" id="btnSpinner"></span>
     <span id="btnText">Analizar</span>
@@ -712,11 +767,13 @@ function detectShorteners(urls) {
 //  API
 // ═══════════════════════════════════════════════════════
 
-async function apiCheckUrls(urls) {
+async function apiCheckUrls(urls, useVT = true) {
+  const payload = urls.length === 1 ? { url: urls[0] } : { urls };
+  if (!useVT) payload.useVT = false;
   const resp = await fetch(CHECK_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(urls.length === 1 ? { url: urls[0] } : { urls }),
+    body: JSON.stringify(payload),
   });
   return resp.json();
 }
@@ -985,13 +1042,15 @@ document.getElementById("analyzeBtn").addEventListener("click", async () => {
   document.getElementById("btnText").textContent = "Analizando…";
 
   try {
+    const useVT = document.getElementById("vtToggle").checked;
+
     const urlsFromBody = body ? extractUrls(body) : [];
     const allUrls = [...new Set([...urlsFromBody, ...(urlOnly ? [urlOnly] : [])])];
     const shorteners = detectShorteners(allUrls);
 
     const [senderResult, urlResult] = await Promise.all([
       sender     ? analyzeSender(sender) : null,
-      allUrls.length > 0 ? apiCheckUrls(allUrls).catch(() => null) : null,
+      allUrls.length > 0 ? apiCheckUrls(allUrls, useVT).catch(() => null) : null,
     ]);
 
     const subjectResult = analyzeSubject(subject);
@@ -1023,6 +1082,7 @@ document.getElementById("clearBtn").addEventListener("click", () => {
   ["senderInput","subjectInput","bodyInput","urlInput"].forEach(id => {
     document.getElementById(id).value = "";
   });
+  document.getElementById("vtToggle").checked = true;
   document.getElementById("results").innerHTML = "";
   updateCharCounter();
 });

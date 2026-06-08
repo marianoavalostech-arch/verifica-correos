@@ -170,8 +170,12 @@ exports.handler = async function (event) {
   const batch     = urls.slice(0, 500);
   const truncated = urls.length > 500;
 
+  // useVT: el cliente puede deshabilitar VirusTotal aunque la clave esté configurada.
+  // Por defecto true para mantener compatibilidad con llamadas sin el campo.
+  const useVT = body.useVT !== false;
+
   const GSB_KEY = process.env.GOOGLE_SAFE_BROWSING_KEY || "";
-  const VT_KEY  = process.env.VIRUSTOTAL_API_KEY       || "";
+  const VT_KEY  = (useVT && process.env.VIRUSTOTAL_API_KEY) || "";
 
   const activeSources = ["URLhaus"];
   if (GSB_KEY) activeSources.unshift("Google Safe Browsing");
