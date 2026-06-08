@@ -579,6 +579,30 @@ const URL_SHORTENERS = new Set([
   "urlo.ws","2url.net","multiurl.com","chilp.it",
 ]);
 
+// Plataformas de email marketing que usan redirección de enlaces
+// (el dominio real del destino está oculto detrás de su servidor)
+const EMAIL_TRACKER_DOMAINS = {
+  "customeriomail.com": "Customer.io",
+  "cio-sb.com":         "Customer.io",
+  "sendgrid.net":       "SendGrid",
+  "sgo.to":             "SendGrid",
+  "list-manage.com":    "Mailchimp",
+  "mailchi.mp":         "Mailchimp",
+  "hs-email.com":       "HubSpot",
+  "hsmail.net":         "HubSpot",
+  "mktomail.com":       "Marketo",
+  "mktdns.com":         "Marketo",
+  "exacttarget.com":    "Salesforce Marketing Cloud",
+  "salesforceiq.com":   "Salesforce",
+  "cmail20.com":        "Campaign Monitor",
+  "createsend.com":     "Campaign Monitor",
+  "klaviyo.com":        "Klaviyo",
+  "mailerlite.com":     "MailerLite",
+  "activecampaign.com": "ActiveCampaign",
+  "brevo.com":          "Brevo (Sendinblue)",
+  "omnisend.com":       "Omnisend",
+};
+
 const THREAT_LABELS = {
   // Google Safe Browsing
   MALWARE:                         "Malware (Google Safe Browsing)",
@@ -761,6 +785,81 @@ function detectShorteners(urls) {
       return URL_SHORTENERS.has(host);
     } catch { return false; }
   });
+}
+
+/**
+ * Detecta la técnica de suplantación via @ en URLs.
+ * En "https://sitio-falso@host-real.com/", el navegador ignora todo
+ * lo anterior al @ y navega al host-real. El usuario cree ver el sitio falso.
+ * Devuelve { fakeHost, realHost } o null si no hay suplantación.
+ */
+function detectUrlSpoofing(url) {
+  try {
+    // Extraer la parte de autoridad (entre :// y el primer /)
+    const m = url.match(/^https?:\/\/([^/?#]+)/);
+    if (!m) return null;
+    const authority = m[1];
+    const atIdx = authority.lastIndexOf("@");
+    if (atIdx === -1) return null;
+    const fakeHost = decodeURIComponent(authority.slice(0, atIdx));
+    const realHost = authority.slice(atIdx + 1);
+    if (!realHost) return null;
+    return { fakeHost, realHost };
+  } catch { return null; }
+}
+
+/**
+ * Devuelve el nombre de la plataforma de email tracker si el dominio
+ * coincide, o null si no es un tracker conocido.
+ */
+function getEmailTracker(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    for (const [domain, name] of Object.entries(EMAIL_TRACKER_DOMAINS)) {
+      if (host === domain || host.endsWith("." + domain)) return name;
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Intenta decodificar la URL de destino real a partir de URLs de tracking
+ * de plataformas conocidas (Customer.io, SendGrid, etc.).
+ * Devuelve la URL real o null si no se pudo extraer.
+ */
+function decodeTrackerRealUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const host   = parsed.hostname;
+
+    // Customer.io: GET /e/c/{base64json}/{hmac}
+    // El payload base64 contiene { href, email_id, link_id, ... }
+    if (host.includes("customeriomail.com") || host.includes("cio-sb.com")) {
+      const m = parsed.pathname.match(/\/e\/c\/([A-Za-z0-9+/=_-]+?)(?:\/|$)/);
+      if (m) {
+        // base64url → base64 estándar
+        const b64     = m[1].replace(/-/g, "+").replace(/_/g, "/");
+        const payload = JSON.parse(atob(b64));
+        if (payload?.href?.startsWith("http")) return payload.href;
+      }
+    }
+
+    // SendGrid click tracking: ?upn=<base64url>
+    if (host.includes("sendgrid.net") || host === "sgo.to") {
+      const upn = parsed.searchParams.get("upn");
+      if (upn) {
+        const raw = atob(upn.replace(/-/g, "+").replace(/_/g, "/"));
+        if (raw.startsWith("http")) return raw;
+      }
+    }
+
+    // Genérico: buscar URL de destino en parámetros de query habituales
+    for (const p of ["url", "u", "redirect", "dest", "link", "href", "goto", "target", "r"]) {
+      const v = parsed.searchParams.get(p);
+      if (v?.startsWith("http")) return v;
+    }
+  } catch {}
+  return null;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1048,15 +1147,38 @@ document.getElementById("analyzeBtn").addEventListener("click", async () => {
     const allUrls = [...new Set([...urlsFromBody, ...(urlOnly ? [urlOnly] : [])])];
     const shorteners = detectShorteners(allUrls);
 
+    // Detectar URLs con suplantación via @ (ej: hotmail.com@sitio-malicioso.com)
+    const spoofedUrls = new Map(); // url → { fakeHost, realHost }
+    for (const url of allUrls) {
+      const spoof = detectUrlSpoofing(url);
+      if (spoof) spoofedUrls.set(url, spoof);
+    }
+
+    // Detectar URLs de plataformas de email tracking y decodificar su destino real
+    const trackerInfo    = new Map(); // trackerUrl → { name, realUrl }
+    const realUrlToTracker = new Map(); // realUrl → trackerUrl (URLs que vienen de un tracker)
+    for (const url of allUrls) {
+      const trackerName = getEmailTracker(url);
+      if (trackerName) {
+        const realUrl = decodeTrackerRealUrl(url);
+        trackerInfo.set(url, { name: trackerName, realUrl });
+        if (realUrl && !allUrls.includes(realUrl)) {
+          realUrlToTracker.set(realUrl, url);
+        }
+      }
+    }
+    // Verificar también las URLs de destino real (para ver si SON maliciosas)
+    const urlsToCheck = [...allUrls, ...[...realUrlToTracker.keys()]];
+
     const [senderResult, urlResult] = await Promise.all([
       sender     ? analyzeSender(sender) : null,
-      allUrls.length > 0 ? apiCheckUrls(allUrls, useVT).catch(() => null) : null,
+      urlsToCheck.length > 0 ? apiCheckUrls(urlsToCheck, useVT).catch(() => null) : null,
     ]);
 
     const subjectResult = analyzeSubject(subject);
     const bodyResult    = analyzeBody(body);
 
-    renderResults({ senderResult, subjectResult, bodyResult, urlResult, allUrls, shorteners });
+    renderResults({ senderResult, subjectResult, bodyResult, urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls });
 
     setTimeout(() => {
       document.getElementById("results").scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -1107,7 +1229,7 @@ document.getElementById("bodyInput").addEventListener("input", updateCharCounter
 //  Renderizado
 // ═══════════════════════════════════════════════════════
 
-function renderResults({ senderResult, subjectResult, bodyResult, urlResult, allUrls, shorteners }) {
+function renderResults({ senderResult, subjectResult, bodyResult, urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls }) {
   const container = document.getElementById("results");
   container.innerHTML = "";
 
@@ -1120,7 +1242,9 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, all
     urlState = urlResult.verdict === "dangerous" ? "danger"
              : urlResult.verdict === "safe"      ? "safe"
              :                                     "warn";
-  } else if (shorteners.length > 0) {
+  } else if (spoofedUrls && spoofedUrls.size > 0) {
+    urlState = "danger";
+  } else if (shorteners.length > 0 || (trackerInfo && trackerInfo.size > 0)) {
     urlState = "warn";
   }
 
@@ -1172,7 +1296,7 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, all
     container.appendChild(buildBodySection(bodyResult));
   }
   if (urlResult || allUrls.length > 0) {
-    container.appendChild(buildUrlSection(urlResult, allUrls, shorteners));
+    container.appendChild(buildUrlSection(urlResult, allUrls, shorteners, trackerInfo || new Map(), realUrlToTracker || new Map(), spoofedUrls || new Map()));
   }
 
   // Nota al pie
@@ -1255,57 +1379,139 @@ function buildBodySection(b) {
   return section;
 }
 
-function buildUrlSection(urlResult, allUrls, shorteners) {
-  const results = urlResult?.results
-    ?? allUrls.map(u => ({ url: u, verdict: "unknown", threats: [] }));
+function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls) {
+  // Mapa rápido: url → resultado del servidor
+  const resultMap = new Map(
+    (urlResult?.results ?? allUrls.map(u => ({ url: u, verdict: "unknown", threats: [] })))
+      .map(r => [r.url, r])
+  );
+  // Agregar resultados de URLs reales decodificadas (si las hay)
+  if (urlResult?.results) {
+    for (const r of urlResult.results) {
+      if (!resultMap.has(r.url)) resultMap.set(r.url, r);
+    }
+  }
 
-  const dangerCount = results.filter(r => r.verdict === "dangerous").length;
-  const state = dangerCount > 0 ? "danger"
-              : shorteners.length > 0 ? "warn"
+  // Solo mostramos las URLs originales del usuario (no las decodificadas como items separados)
+  // Las decodificadas aparecen inline dentro del item del tracker.
+  const displayUrls = allUrls;
+
+  // Peligrosas: solo entre las URLs originales (excluir las decodificadas)
+  const dangerCount = displayUrls.filter(u =>
+    spoofedUrls?.has(u) || resultMap.get(u)?.verdict === "dangerous"
+  ).length;
+  // También contar si alguna URL real (decodificada de tracker) es peligrosa
+  const realUrlDangerCount = [...realUrlToTracker.keys()]
+    .filter(u => resultMap.get(u)?.verdict === "dangerous").length;
+  const totalDanger = dangerCount + realUrlDangerCount;
+
+  const hasTrackers   = trackerInfo.size > 0;
+  const hasShorteners = shorteners.length > 0;
+
+  const state = totalDanger > 0 ? "danger"
+              : hasShorteners || hasTrackers ? "warn"
               : (urlResult?.verdict === "safe" ? "safe" : "warn");
-  const label = dangerCount > 0
-    ? `${dangerCount} PELIGROSA${dangerCount > 1 ? "S" : ""}`
-    : (urlResult?.verdict === "safe" ? "LIMPIAS" : "SIN VERIFICAR");
+
+  const label = totalDanger > 0
+    ? `${totalDanger} PELIGROSA${totalDanger > 1 ? "S" : ""}`
+    : (urlResult?.verdict === "safe" && !hasTrackers && !hasShorteners ? "LIMPIAS" : "AVISO");
 
   const section = document.createElement("div");
   section.className = `result-section ${state}`;
+
+  const itemsHtml = displayUrls.map(url => {
+    const r          = resultMap.get(url) ?? { url, verdict: "unknown", threats: [] };
+    const isShortener = shorteners.includes(url);
+    const tracker    = trackerInfo?.get(url);   // { name, realUrl } | undefined
+    const realUrlResult = tracker?.realUrl ? resultMap.get(tracker.realUrl) : null;
+    const spoofing   = spoofedUrls?.get(url);   // { fakeHost, realHost } | undefined
+
+    let cls, verdictText;
+
+    if (spoofing) {
+      // La suplantación via @ tiene prioridad — es siempre peligrosa
+      cls = "url-danger";
+      verdictText = `⚠ URL FALSIFICADA — aparenta ser "${spoofing.fakeHost}" pero el destino real es "${spoofing.realHost}"`;
+    } else if (r.verdict === "dangerous") {
+      cls = "url-danger";
+      const threats = (r.threats || []).map(t => THREAT_LABELS[t] || t).join(", ");
+      verdictText = "⚠ " + (threats || "AMENAZA DETECTADA");
+    } else if (tracker) {
+      // Es un tracker de email — el estado depende también del destino real
+      cls = realUrlResult?.verdict === "dangerous" ? "url-danger" : "url-warn";
+      verdictText = `⚡ Tracking (${tracker.name}) — el destino real está enmascarado`;
+    } else if (isShortener) {
+      cls = "url-warn";
+      verdictText = "⚡ Acortador de URL — el destino real está oculto";
+    } else if (r.verdict === "safe") {
+      cls = "url-safe";
+      verdictText = "✓ Sin amenazas";
+    } else {
+      cls = "url-unknown";
+      verdictText = "? Sin verificar";
+    }
+
+    // Bloque inline del destino real decodificado (solo para trackers)
+    let realUrlBlock = "";
+    if (tracker) {
+      if (tracker.realUrl) {
+        let rColor, rText;
+        if (realUrlResult?.verdict === "dangerous") {
+          const threats = (realUrlResult.threats || []).map(t => THREAT_LABELS[t] || t).join(", ");
+          rColor = "var(--danger)";
+          rText  = "⚠ " + (threats || "AMENAZA DETECTADA en destino real");
+        } else if (realUrlResult?.verdict === "safe") {
+          rColor = "var(--accent)";
+          rText  = "✓ Sin amenazas";
+        } else {
+          rColor = "var(--muted)";
+          rText  = "? Sin verificar";
+        }
+        realUrlBlock = `
+          <div style="margin-top:8px;padding:8px 10px;border-radius:6px;
+                      border:1px solid var(--border);background:rgba(0,0,0,.25)">
+            <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                        margin-bottom:4px;letter-spacing:.5px;text-transform:uppercase">
+              → Destino real decodificado
+            </div>
+            <div class="url-text" style="margin-bottom:4px;color:var(--text)">
+              ${esc(tracker.realUrl)}
+            </div>
+            <div style="font-family:var(--mono);font-size:11px;font-weight:700;
+                        color:${rColor}">${esc(rText)}</div>
+          </div>`;
+      } else {
+        realUrlBlock = `
+          <div style="margin-top:6px;font-size:11px;color:var(--muted);
+                      font-family:var(--mono)">
+            ℹ No se pudo decodificar el destino real — abre el enlace con precaución.
+          </div>`;
+      }
+    }
+
+    return `<div class="url-item ${cls}">
+              <div class="url-text">${esc(url)}</div>
+              <div class="url-verdict">${esc(verdictText)}</div>
+              ${realUrlBlock}
+            </div>`;
+  }).join("");
+
   section.innerHTML = `
     <div class="section-title">
       <div class="section-title-left">
         <span>🔗</span>
-        <span>URLs (${results.length})</span>
+        <span>URLs (${displayUrls.length})</span>
       </div>
       <span class="section-badge">${label}</span>
     </div>
     <div class="section-body">
-      ${results.map(r => {
-        const isShortener = shorteners.includes(r.url);
-        let cls, verdictText;
-        if (r.verdict === "dangerous") {
-          cls = "url-danger";
-          const threats = (r.threats || []).map(t => THREAT_LABELS[t] || t).join(", ");
-          verdictText = "⚠ " + (threats || "AMENAZA DETECTADA");
-        } else if (isShortener) {
-          cls = "url-warn";
-          verdictText = "⚡ Acortador de URL — el destino real está oculto";
-        } else if (r.verdict === "safe") {
-          cls = "url-safe";
-          verdictText = "✓ Sin amenazas";
-        } else {
-          cls = "url-unknown";
-          verdictText = "? Sin verificar";
-        }
-        return `<div class="url-item ${cls}">
-                  <div class="url-text">${esc(r.url)}</div>
-                  <div class="url-verdict">${esc(verdictText)}</div>
-                </div>`;
-      }).join("")}
+      ${itemsHtml}
       ${urlResult?.source ? `
         <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
                     margin-top:10px;letter-spacing:.3px">
           Fuentes consultadas: ${esc(urlResult.source)}
         </div>` : ""}
-      ${!urlResult && results.length > 0 ? `
+      ${!urlResult && displayUrls.length > 0 ? `
         <div style="font-size:12px;color:var(--muted);margin-top:8px">
           No se pudo contactar con el servidor de verificación.
         </div>` : ""}
