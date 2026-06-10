@@ -311,6 +311,41 @@ function getEmailTracker(url) {
 }
 
 /**
+ * Detecta si una URL usa un parámetro de redirect con contenido cifrado/ofuscado.
+ * Patrón: parámetro de intención de redirect (src, dest, data…) con valor
+ * largo en base64 que NO decodifica como URL ni como texto ASCII legible.
+ * Es común en redirectores de phishing avanzados que ocultan el destino final.
+ */
+function hasObfuscatedRedirectParam(url) {
+  const REDIRECT_INTENT = new Set([
+    "src", "source", "data", "d", "dest", "destination",
+    "r", "redir", "redirect", "out", "go", "goto", "to",
+    "forward", "fwd", "link", "target", "href", "next"
+  ]);
+  try {
+    const parsed = new URL(url);
+    for (const [key, v] of parsed.searchParams) {
+      if (!REDIRECT_INTENT.has(key.toLowerCase())) continue;
+      if (v.length < 40) continue;
+      if (!/^[A-Za-z0-9+/=_-]+$/.test(v)) continue;
+      // Intentar decodificar: si el resultado NO es URL ni texto ASCII legible → cifrado
+      let isReadable = false;
+      for (const variant of [v.replace(/-/g, "+").replace(/_/g, "/"), v]) {
+        try {
+          const decoded = atob(variant);
+          if (/^https?:\/\//i.test(decoded)) { isReadable = true; break; }
+          if ([...decoded].every(c => c.charCodeAt(0) >= 32 && c.charCodeAt(0) < 127)) {
+            isReadable = true; break;
+          }
+        } catch {}
+      }
+      if (!isReadable) return true; // bytes binarios → contenido cifrado
+    }
+  } catch {}
+  return false;
+}
+
+/**
  * Intenta decodificar la URL de destino real a partir de URLs de tracking
  * de plataformas conocidas (Customer.io, SendGrid, etc.).
  * Devuelve la URL real o null si no se pudo extraer.
@@ -875,12 +910,37 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, all
     states.includes("warn")   ? "warn"   :
     states.length > 0         ? "safe"   : "warn";
 
+  // Puntuación de técnicas de evasión de URL (independiente de las APIs de amenazas)
+  // Detecta ocultamiento activo del destino como señal de phishing, no solo URLs maliciosas conocidas.
+  const evasionTechniques = [];
+  if (spoofedUrls?.size > 0) {
+    evasionTechniques.push({ label: "URL falsificada (suplantación via @)", score: 80 });
+  }
+  if (redirectInfo?.size > 0) {
+    let hasObfuscated = false;
+    for (const destUrl of redirectInfo.values()) {
+      if (hasObfuscatedRedirectParam(destUrl)) { hasObfuscated = true; break; }
+    }
+    if (hasObfuscated) {
+      evasionTechniques.push({ label: "Parámetro de destino cifrado — destino final oculto", score: 55 });
+    } else {
+      evasionTechniques.push({ label: "Redirect a dominio externo (parámetro ?url=)", score: 30 });
+    }
+  }
+  if (shorteners.length > 0) {
+    evasionTechniques.push({ label: "Acortador de URL — destino real no visible", score: 30 });
+  }
+  if (trackerInfo?.size > 0) {
+    evasionTechniques.push({ label: "URL de tracking — enmascara el destino real", score: 20 });
+  }
+  const urlTechniqueScore = evasionTechniques.reduce((m, t) => Math.max(m, t.score), 0);
+
   // Puntaje de riesgo (máximo entre todas las dimensiones)
   const riskScore = Math.min(Math.max(
     senderResult?.score  ?? 0,
     subjectResult?.score ?? 0,
     bodyResult?.score    ?? 0,
-    urlState === "danger" ? 85 : urlState === "warn" ? 35 : 0,
+    urlState === "danger" ? 85 : urlState === "warn" ? Math.max(35, urlTechniqueScore) : 0,
   ), 100);
 
   const riskColor = riskScore >= 60 ? "var(--danger)" : riskScore >= 20 ? "var(--warn)" : "var(--accent)";
@@ -917,7 +977,7 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, all
     container.appendChild(buildBodySection(bodyResult));
   }
   if (urlResult || allUrls.length > 0) {
-    container.appendChild(buildUrlSection(urlResult, allUrls, shorteners, trackerInfo || new Map(), realUrlToTracker || new Map(), spoofedUrls || new Map(), redirectInfo || new Map()));
+    container.appendChild(buildUrlSection(urlResult, allUrls, shorteners, trackerInfo || new Map(), realUrlToTracker || new Map(), spoofedUrls || new Map(), redirectInfo || new Map(), evasionTechniques || []));
   }
 
   // Nota al pie
@@ -1000,7 +1060,7 @@ function buildBodySection(b) {
   return section;
 }
 
-function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo) {
+function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo, evasionTechniques = []) {
   // Mapa rápido: url → resultado del servidor
   const resultMap = new Map(
     (urlResult?.results ?? allUrls.map(u => ({ url: u, verdict: "unknown", threats: [] })))
@@ -1044,6 +1104,27 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
   const section = document.createElement("div");
   section.className = `result-section ${state}`;
 
+  // Bloque de técnicas de evasión detectadas
+  const techScore = evasionTechniques.reduce((m, t) => Math.max(m, t.score), 0);
+  const evasionHtml = evasionTechniques.length > 0 ? `
+    <div style="margin-bottom:10px;padding:10px 12px;border-radius:6px;
+                border:1px solid var(--border);background:rgba(0,0,0,.2)">
+      <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                  letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px">
+        Técnicas de ocultamiento detectadas
+        <span style="float:right;color:${techScore >= 50 ? "var(--danger)" : "var(--warn)"};font-weight:700">
+          Indicador de phishing: ${techScore >= 55 ? "ALTO" : techScore >= 30 ? "MODERADO" : "BAJO"} · ${techScore}/100
+        </span>
+      </div>
+      ${evasionTechniques.map(t => `
+        <div style="display:flex;align-items:baseline;gap:8px;margin-top:4px">
+          <span style="font-family:var(--mono);font-size:10px;
+                       color:${t.score >= 50 ? "var(--danger)" : "var(--warn)"};
+                       flex-shrink:0">+${t.score}</span>
+          <span style="font-size:12px;color:var(--text)">${esc(t.label)}</span>
+        </div>`).join("")}
+    </div>` : "";
+
   const itemsHtml = displayUrls.map(url => {
     const r          = resultMap.get(url) ?? { url, verdict: "unknown", threats: [] };
     const isShortener = shorteners.includes(url);
@@ -1072,9 +1153,12 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
       // Redirect genérico: la URL contiene un parámetro ?url= con un destino oculto
       const isRealDangerous = redirectRealResult?.verdict === "dangerous";
       const hasDestChain    = (redirectRealResult?.redirectChain?.length ?? 0) > 0;
+      const isObfuscated    = hasObfuscatedRedirectParam(redirectRealUrl);
       cls = isRealDangerous ? "url-danger" : "url-warn";
       verdictText = isRealDangerous
         ? "⚠ REDIRIGE A URL PELIGROSA"
+        : isObfuscated
+        ? "⚠ El destino usa parámetros cifrados — sitio final DESCONOCIDO"
         : hasDestChain
         ? "⚡ Cadena de redirects detectada — destino final no figura en listas negras"
         : "⚡ Redirige a otro dominio (parámetro ?url=) — destino verificado";
@@ -1133,11 +1217,15 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
     // aunque no figure todavía en ninguna base de datos de amenazas.
     let redirectBlock = "";
     if (redirectRealUrl) {
+      const isObfuscatedDest = hasObfuscatedRedirectParam(redirectRealUrl);
       let rColor, rText;
       if (redirectRealResult?.verdict === "dangerous") {
         const threats = (redirectRealResult.threats || []).map(t => THREAT_LABELS[t] || t).join(", ");
         rColor = "var(--danger)";
         rText  = "⚠ " + (threats || "AMENAZA DETECTADA en destino");
+      } else if (isObfuscatedDest) {
+        rColor = "var(--warn)";
+        rText  = "⚠ Parámetros cifrados — destino final NO verificable";
       } else if (redirectRealResult?.verdict === "safe") {
         rColor = "var(--accent)";
         rText  = "✓ Sin amenazas en el destino (según bases de datos actuales)";
@@ -1216,6 +1304,7 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
       <span class="section-badge">${label}</span>
     </div>
     <div class="section-body">
+      ${evasionHtml}
       ${itemsHtml}
       ${urlResult?.source ? `
         <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
