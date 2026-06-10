@@ -92,6 +92,10 @@ const BODY_RULES = [
       /urg[ei]nte/i, /urgencia/i, /inmediata?mente/i, /de inmediato/i,
       /24 horas/i, /48 horas/i, /vence (hoy|mañana)/i, /plazo/i,
       /lo antes posible/i, /ahora mismo/i, /cuanto antes/i,
+      // English
+      /\burgent\b/i, /\bimmediately\b/i, /right away/i,
+      /action required/i, /immediate action/i,
+      /within \d+ hours?/i, /expires? (?:today|soon|tomorrow)/i,
     ],
     desc: () => "Usa lenguaje de urgencia para presionar al destinatario a actuar sin pensar.",
   },
@@ -116,6 +120,10 @@ const BODY_RULES = [
       /cerrad[ao]/i, /eliminad[ao]/i, /desactivad[ao]/i,
       /acceso restringido/i, /ser[aá] bloqueada/i, /ser[aá] suspendida/i,
       /perder[aá] (su |el )?acceso/i,
+      // English
+      /account.{0,20}(?:restricted|suspended|blocked|limited|locked)/i,
+      /access.{0,20}(?:restricted|suspended|blocked|limited)/i,
+      /temporarily.{0,20}(?:limited|restricted|suspended|blocked)/i,
     ],
     desc: () => "Amenaza con suspender, bloquear o cancelar tu cuenta si no actúas.",
   },
@@ -138,6 +146,10 @@ const BODY_RULES = [
       /haga clic/i, /haz clic/i, /clic aqu[ií]/i, /click aqu[ií]/i,
       /pinche aqu[ií]/i, /acceda aqu[ií]/i, /confirme aqu[ií]/i,
       /verifique aqu[ií]/i, /ingrese al enlace/i, /siga el enlace/i,
+      // English
+      /click here/i, /click the link/i,
+      /verify (?:account|your) (?:access|identity)/i,
+      /takes? less than.{0,20}minutes?/i,
     ],
     desc: () => "Presiona para hacer clic en un enlace urgentemente.",
   },
@@ -153,6 +165,7 @@ const BODY_RULES = [
       /\bwhatsapp\b/i, /\btelegram\b/i, /\btwitter\b/i, /\btiktok\b/i,
       /\blinkedin\b/i, /\bdropbox\b/i,
       /\bdhl\b/i, /\bfedex\b/i, /\bups\b/i,
+      /\bamerican express\b/i, /\bamex\b/i,
       // Bancos / fintech
       /\bbbva\b/i, /\bsantander\b/i, /\bhsbc\b/i, /\bicbc\b/i,
       /\bcitibank\b/i, /\bnaci[oó]n\b/i, /\bgalicia\b/i,
@@ -191,6 +204,13 @@ const BODY_RULES = [
       /problema (?:con|en) (?:su|tu) cuenta/i,
       /acceso (?:inusual|sospechoso|no autorizado)/i,
       /inicio de sesi[oó]n (?:inusual|sospechoso)/i,
+      // English
+      /verify.{0,20}(?:your|account|identity|access)/i,
+      /suspicious.{0,20}(?:sign.?in|log.?in|activity|attempt)/i,
+      /unrecognized.{0,20}device/i,
+      /unusual.{0,20}(?:sign.?in|activity|access)/i,
+      /restore.{0,20}(?:full\s+)?access/i,
+      /for your (?:protection|security)/i,
     ],
     desc: () => "Solicita verificar o actualizar datos de cuenta — táctica central de phishing.",
   },
@@ -694,7 +714,24 @@ document.getElementById("analyzeBtn").addEventListener("click", async () => {
       }
     }
     // Verificar también las URLs de destino real (para ver si SON maliciosas)
-    const urlsToCheck = [...allUrls, ...[...realUrlToTracker.keys()]];
+    // Decodificar redirects genéricos: cualquier URL con ?url= (u otros parámetros comunes)
+    // que NO sea ya un tracker conocido. Permite detectar destinos ocultos en
+    // redirectores gubernamentales o corporativos (ej: smail.chaco.gob.ar).
+    const redirectInfo = new Map(); // url original → url de destino real
+    for (const url of allUrls) {
+      if (!trackerInfo.has(url)) {
+        const realUrl = decodeTrackerRealUrl(url);
+        if (realUrl && realUrl !== url && !allUrls.includes(realUrl)) {
+          redirectInfo.set(url, realUrl);
+        }
+      }
+    }
+
+    const urlsToCheck = [
+      ...allUrls,
+      ...[...realUrlToTracker.keys()],
+      ...[...redirectInfo.values()].filter(u => !allUrls.includes(u)),
+    ];
 
     const [senderResult, urlResult] = await Promise.all([
       sender     ? analyzeSender(sender) : null,
@@ -704,7 +741,7 @@ document.getElementById("analyzeBtn").addEventListener("click", async () => {
     const subjectResult = analyzeSubject(subject);
     const bodyResult    = analyzeBody(body);
 
-    renderResults({ senderResult, subjectResult, bodyResult, urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls });
+    renderResults({ senderResult, subjectResult, bodyResult, urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo });
 
     setTimeout(() => {
       document.getElementById("results").scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -755,7 +792,7 @@ document.getElementById("bodyInput").addEventListener("input", updateCharCounter
 //  Renderizado
 // ═══════════════════════════════════════════════════════
 
-function renderResults({ senderResult, subjectResult, bodyResult, urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls }) {
+function renderResults({ senderResult, subjectResult, bodyResult, urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo }) {
   const container = document.getElementById("results");
   container.innerHTML = "";
 
@@ -829,7 +866,7 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, all
     container.appendChild(buildBodySection(bodyResult));
   }
   if (urlResult || allUrls.length > 0) {
-    container.appendChild(buildUrlSection(urlResult, allUrls, shorteners, trackerInfo || new Map(), realUrlToTracker || new Map(), spoofedUrls || new Map()));
+    container.appendChild(buildUrlSection(urlResult, allUrls, shorteners, trackerInfo || new Map(), realUrlToTracker || new Map(), spoofedUrls || new Map(), redirectInfo || new Map()));
   }
 
   // Nota al pie
@@ -912,7 +949,7 @@ function buildBodySection(b) {
   return section;
 }
 
-function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls) {
+function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo) {
   // Mapa rápido: url → resultado del servidor
   const resultMap = new Map(
     (urlResult?.results ?? allUrls.map(u => ({ url: u, verdict: "unknown", threats: [] })))
@@ -930,9 +967,11 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
   const displayUrls = allUrls;
 
   // Peligrosas: solo entre las URLs originales (excluir las decodificadas)
-  const dangerCount = displayUrls.filter(u =>
-    spoofedUrls?.has(u) || resultMap.get(u)?.verdict === "dangerous"
-  ).length;
+  const dangerCount = displayUrls.filter(u => {
+    if (spoofedUrls?.has(u) || resultMap.get(u)?.verdict === "dangerous") return true;
+    const rDest = redirectInfo?.get(u);
+    return rDest && resultMap.get(rDest)?.verdict === "dangerous";
+  }).length;
   // También contar si alguna URL real (decodificada de tracker) es peligrosa
   const realUrlDangerCount = [...realUrlToTracker.keys()]
     .filter(u => resultMap.get(u)?.verdict === "dangerous").length;
@@ -958,6 +997,9 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
     const tracker    = trackerInfo?.get(url);   // { name, realUrl } | undefined
     const realUrlResult = tracker?.realUrl ? resultMap.get(tracker.realUrl) : null;
     const spoofing   = spoofedUrls?.get(url);   // { fakeHost, realHost } | undefined
+    // Redirect genérico: solo aplica si no es tracker conocido ni URL suplantada
+    const redirectRealUrl    = (!tracker && !spoofing) ? (redirectInfo?.get(url) ?? null) : null;
+    const redirectRealResult = redirectRealUrl ? (resultMap.get(redirectRealUrl) ?? null) : null;
 
     let cls, verdictText;
 
@@ -973,6 +1015,13 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
       // Es un tracker de email — el estado depende también del destino real
       cls = realUrlResult?.verdict === "dangerous" ? "url-danger" : "url-warn";
       verdictText = `⚡ Tracking (${tracker.name}) — el destino real está enmascarado`;
+    } else if (redirectRealUrl) {
+      // Redirect genérico: la URL contiene un parámetro ?url= con un destino oculto
+      const isRealDangerous = redirectRealResult?.verdict === "dangerous";
+      cls = isRealDangerous ? "url-danger" : "url-warn";
+      verdictText = isRealDangerous
+        ? "⚠ REDIRIGE A URL PELIGROSA"
+        : "⚡ Redirige a otro dominio (parámetro ?url=) — destino verificado";
     } else if (isShortener) {
       cls = "url-warn";
       verdictText = "⚡ Acortador de URL — el destino real está oculto";
@@ -1022,10 +1071,41 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
       }
     }
 
+    // Bloque inline del destino decodificado para redirects genéricos
+    let redirectBlock = "";
+    if (redirectRealUrl) {
+      let rColor, rText;
+      if (redirectRealResult?.verdict === "dangerous") {
+        const threats = (redirectRealResult.threats || []).map(t => THREAT_LABELS[t] || t).join(", ");
+        rColor = "var(--danger)";
+        rText  = "⚠ " + (threats || "AMENAZA DETECTADA en destino");
+      } else if (redirectRealResult?.verdict === "safe") {
+        rColor = "var(--accent)";
+        rText  = "✓ Sin amenazas en el destino";
+      } else {
+        rColor = "var(--muted)";
+        rText  = "? Sin verificar";
+      }
+      redirectBlock = `
+        <div style="margin-top:8px;padding:8px 10px;border-radius:6px;
+                    border:1px solid var(--border);background:rgba(0,0,0,.25)">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                      margin-bottom:4px;letter-spacing:.5px;text-transform:uppercase">
+            → Destino decodificado (parámetro ?url=)
+          </div>
+          <div class="url-text" style="margin-bottom:4px;color:var(--text)">
+            ${esc(redirectRealUrl)}
+          </div>
+          <div style="font-family:var(--mono);font-size:11px;font-weight:700;
+                      color:${rColor}">${esc(rText)}</div>
+        </div>`;
+    }
+
     return `<div class="url-item ${cls}">
               <div class="url-text">${esc(url)}</div>
               <div class="url-verdict">${esc(verdictText)}</div>
               ${realUrlBlock}
+              ${redirectBlock}
             </div>`;
   }).join("");
 
