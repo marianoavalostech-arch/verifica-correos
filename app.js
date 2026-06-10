@@ -7,7 +7,9 @@ const CHECK_ENDPOINT = "/check";
 const STD_NOTE =
   "Resultado orientativo. Ninguna herramienta detecta el 100 % de las amenazas. " +
   "Un correo puede ser peligroso aunque aparezca como limpio. " +
-  "Fuentes: Google Safe Browsing, URLhaus (abuse.ch) y análisis heurístico propio.";
+  "Fuentes del servidor: Google Safe Browsing, URLhaus, ThreatFox (abuse.ch), VirusTotal (opcional). " +
+  "Se analizan cadenas de redirects HTTP de hasta 3 saltos. " +
+  "Fuentes del navegador: Cloudflare DNS (MX/SPF/DMARC), RDAP (antigüedad), análisis heurístico propio.";
 
 const COMMON_DOMAINS = [
   "gmail.com","googlemail.com","hotmail.com","hotmail.es","hotmail.com.ar",
@@ -26,6 +28,8 @@ const SUSPICIOUS_TLDS = new Set([
   // Nuevos gTLDs con alto índice de abuso
   "zip","mov","cam","icu","vip","buzz","cyou","cfd","sbs",
   "hair","uno","monster","rest","pw","cc","su","ws",
+  // gTLDs genéricos con alta tasa de phishing
+  "online","site","live","store","club",
 ]);
 
 const URL_SHORTENERS = new Set([
@@ -1101,11 +1105,33 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
         </div>`;
     }
 
+    // Cadena de redirects HTTP descubiertos por el servidor (r.redirectChain).
+    // Visible cuando el servidor siguió saltos 302 y uno resultó peligroso.
+    let serverChainBlock = "";
+    const serverHops = r.redirectChain;
+    if (serverHops?.length > 0) {
+      const hopsHtml = serverHops.map(hopUrl => `
+        <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                    margin-top:3px;padding-left:8px;border-left:2px solid var(--border)">
+          ↳ ${esc(hopUrl)}
+        </div>`).join("");
+      serverChainBlock = `
+        <div style="margin-top:8px;padding:6px 10px;border-radius:6px;
+                    border:1px solid var(--border);background:rgba(0,0,0,.15)">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                      margin-bottom:4px;letter-spacing:.5px;text-transform:uppercase">
+            → Cadena de redirects HTTP (servidor)
+          </div>
+          ${hopsHtml}
+        </div>`;
+    }
+
     return `<div class="url-item ${cls}">
               <div class="url-text">${esc(url)}</div>
               <div class="url-verdict">${esc(verdictText)}</div>
               ${realUrlBlock}
               ${redirectBlock}
+              ${serverChainBlock}
             </div>`;
   }).join("");
 

@@ -39,8 +39,11 @@ const CORS_HEADERS = {
 const VALID_URL_RE = /^https?:\/\/.{3,2000}$/;
 
 // Límite de URLs por llamada y tamaño máximo del body (bytes).
-const MAX_URLS      = 100;
-const MAX_BODY_SIZE = 50_000;
+const MAX_URLS           = 100;
+const MAX_BODY_SIZE      = 50_000;
+// Cap de seguridad: evita que redirect expansion genere cientos de requests a abuse.ch.
+// En el peor caso teórico: 100 URLs × 3 saltos = 300; el cap lo acota a este valor.
+const MAX_ALLCHECK_URLS  = 300;
 
 // --- Funciones de consulta por fuente ---
 
@@ -54,7 +57,7 @@ async function queryGSB(urls, apiKey) {
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       signal: ctrl.signal,
       body: JSON.stringify({
-        client: { clientId: "verifica-correos", clientVersion: "1.1.0" },
+        client: { clientId: "verifica-correos", clientVersion: "1.3.0" },
         threatInfo: {
           threatTypes:      GSB_THREAT_TYPES,
           platformTypes:    ["ANY_PLATFORM"],
@@ -183,6 +186,45 @@ async function queryVirusTotal(url, apiKey) {
   }
 }
 
+/**
+ * Sigue redirects HTTP para una URL usando HEAD requests (máx. maxHops saltos).
+ * Devuelve la cadena completa: [urlOriginal, salto1, salto2, ...].
+ * Si el servidor bloquea el HEAD o hay timeout, la cadena queda parcial
+ * pero el análisis continúa con las URLs descubiertas hasta ese punto.
+ */
+async function followRedirects(startUrl, maxHops = 3) {
+  const chain = [startUrl];
+  let current = startUrl;
+  for (let i = 0; i < maxHops; i++) {
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      const resp = await fetch(current, {
+        method: "HEAD",
+        redirect: "manual",
+        signal: ctrl.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+        },
+      });
+      clearTimeout(tid);
+      if (resp.status < 300 || resp.status >= 400) break;
+      const location = resp.headers.get("location");
+      if (!location) break;
+      let next;
+      try { next = new URL(location, current).href; } catch { break; }
+      if (chain.includes(next)) break;          // evitar ciclos
+      if (!VALID_URL_RE.test(next)) break;      // solo http/https
+      chain.push(next);
+      current = next;
+    } catch {
+      clearTimeout(tid);
+      break;
+    }
+  }
+  return chain;
+}
+
 // --- Handler principal ---
 
 exports.handler = async function (event) {
@@ -250,31 +292,55 @@ exports.handler = async function (event) {
   if (GSB_KEY) activeSources.unshift("Google Safe Browsing");
   if (VT_KEY)  activeSources.push("VirusTotal");
 
+  // Seguir redirects HTTP para detectar cadenas multi-salto
+  // (ej: redirector corporativo → landing → página de phishing real).
+  const redirectChainMap = new Map(); // url original → [url, salto1, salto2, ...]
+  await Promise.all(
+    batch.map(async (url) => {
+      redirectChainMap.set(url, await followRedirects(url));
+    })
+  );
+
+  // URLs únicas a verificar: originales + todos los saltos descubiertos.
+  // Se aplica MAX_ALLCHECK_URLS para acotar el número de requests a las APIs externas.
+  const allCheckUrls = [...new Set(
+    batch.concat([...redirectChainMap.values()].flat())
+  )].slice(0, MAX_ALLCHECK_URLS);
+
   const [gsbMatches, urlhausAll, threatfoxAll, vtAll] = await Promise.all([
     GSB_KEY
-      ? queryGSB(batch, GSB_KEY)
+      ? queryGSB(allCheckUrls, GSB_KEY)
       : Promise.resolve([]),
-    Promise.all(batch.map((u) => queryUrlhaus(u))),
-    Promise.all(batch.map((u) => queryThreatFox(u))),
-    Promise.all(batch.map((u) => queryVirusTotal(u, VT_KEY))),
+    Promise.all(allCheckUrls.map((u) => queryUrlhaus(u))),
+    Promise.all(allCheckUrls.map((u) => queryThreatFox(u))),
+    Promise.all(allCheckUrls.map((u) => queryVirusTotal(u, VT_KEY))),
   ]);
 
-  const results = batch.map((url, i) => {
+  // Mapa url → threats[] para búsqueda rápida en toda la cadena
+  const threatsByUrl = new Map();
+  for (let i = 0; i < allCheckUrls.length; i++) {
+    const u = allCheckUrls[i];
     const gsbThreats = gsbMatches
-      .filter((m) => m.threat?.url === url)
+      .filter((m) => m.threat?.url === u)
       .map((m) => m.threatType);
-
     const threats = [
       ...gsbThreats,
-      ...(urlhausAll[i]   || []),
+      ...(urlhausAll[i] || []),
       ...(threatfoxAll[i] || []),
-      ...(vtAll[i]        || []),
+      ...(vtAll[i] || []),
     ];
+    if (threats.length) threatsByUrl.set(u, threats);
+  }
 
+  const results = batch.map((url) => {
+    const chain   = redirectChainMap.get(url) || [url];
+    const threats = [...new Set(chain.flatMap(u => threatsByUrl.get(u) || []))];
+    const redirectHops = chain.slice(1);
     return {
       url,
       verdict: threats.length ? "dangerous" : "safe",
       threats,
+      ...(redirectHops.length > 0 && { redirectChain: redirectHops }),
     };
   });
 
@@ -283,6 +349,7 @@ exports.handler = async function (event) {
 
   let note =
     "Resultado orientativo. Fuentes consultadas: " + sourceStr + ". " +
+    "Se analizan también los destinos de redirects HTTP (hasta 3 saltos). " +
     "Ninguna herramienta detecta el 100 % de las amenazas: " +
     "un correo puede ser peligroso aunque aparezca como limpio.";
   if (truncated) {
