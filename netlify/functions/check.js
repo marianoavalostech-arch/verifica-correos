@@ -187,40 +187,59 @@ async function queryVirusTotal(url, apiKey) {
 }
 
 /**
- * Sigue redirects HTTP para una URL usando HEAD requests (máx. maxHops saltos).
+ * Sigue redirects HTTP para una URL (máx. maxHops saltos).
+ * Intenta HEAD primero (sin body); si el servidor bloquea HEAD (405/400/error)
+ * o devuelve 2xx sin redirigir, reintenta con GET + redirect:"manual".
+ * Con redirect:"manual" el body nunca se descarga para respuestas 3xx.
  * Devuelve la cadena completa: [urlOriginal, salto1, salto2, ...].
- * Si el servidor bloquea el HEAD o hay timeout, la cadena queda parcial
- * pero el análisis continúa con las URLs descubiertas hasta ese punto.
  */
 async function followRedirects(startUrl, maxHops = 3) {
-  const chain = [startUrl];
-  let current = startUrl;
+  const BROWSER_UA =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+  const chain   = [startUrl];
+  let current   = startUrl;
+
   for (let i = 0; i < maxHops; i++) {
-    const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), 5000);
-    try {
-      const resp = await fetch(current, {
-        method: "HEAD",
-        redirect: "manual",
-        signal: ctrl.signal,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-        },
-      });
+    let location = null;
+
+    // Intenta HEAD; si falla o responde 405/400 sin redirect, prueba GET.
+    for (const method of ["HEAD", "GET"]) {
+      const ctrl = new AbortController();
+      const tid  = setTimeout(() => ctrl.abort(), 5000);
+      let resp;
+      try {
+        resp = await fetch(current, {
+          method,
+          redirect: "manual",
+          signal:   ctrl.signal,
+          headers:  { "User-Agent": BROWSER_UA },
+        });
+      } catch {
+        clearTimeout(tid);
+        break;
+      }
       clearTimeout(tid);
-      if (resp.status < 300 || resp.status >= 400) break;
-      const location = resp.headers.get("location");
-      if (!location) break;
-      let next;
-      try { next = new URL(location, current).href; } catch { break; }
-      if (chain.includes(next)) break;          // evitar ciclos
-      if (!VALID_URL_RE.test(next)) break;      // solo http/https
-      chain.push(next);
-      current = next;
-    } catch {
-      clearTimeout(tid);
-      break;
+
+      if (resp.status >= 300 && resp.status < 400) {
+        location = resp.headers.get("location");
+        break;                          // redirect encontrado
+      }
+      // HEAD rechazado → probar GET
+      if (method === "HEAD" && (resp.status === 405 || resp.status === 400)) {
+        continue;
+      }
+      break;                            // 2xx u otro código → no hay redirect
     }
+
+    if (!location) break;
+    let next;
+    try { next = new URL(location, current).href; } catch { break; }
+    if (chain.includes(next)) break;     // evitar ciclos
+    if (!VALID_URL_RE.test(next)) break; // solo http/https
+    chain.push(next);
+    current = next;
   }
   return chain;
 }

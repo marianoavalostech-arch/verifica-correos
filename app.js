@@ -341,10 +341,39 @@ function decodeTrackerRealUrl(url) {
       }
     }
 
-    // Genérico: buscar URL de destino en parámetros de query habituales
-    for (const p of ["url", "u", "redirect", "dest", "link", "href", "goto", "target", "r"]) {
+    // Genérico paso 1: parámetros habituales con valor directo
+    for (const p of ["url", "u", "redirect", "dest", "destination", "link",
+                     "href", "goto", "target", "r", "src", "source", "ref",
+                     "return", "next", "forward", "to", "out", "go"]) {
       const v = parsed.searchParams.get(p);
-      if (v?.startsWith("http")) return v;
+      if (!v) continue;
+      // Valor directo (ya es una URL)
+      if (/^https?:\/\//i.test(v)) return v;
+      // URL-encode anidada
+      try {
+        const dec = decodeURIComponent(v);
+        if (/^https?:\/\//i.test(dec)) return dec;
+      } catch {}
+    }
+
+    // Genérico paso 2: cualquier parámetro cuyo valor parezca base64
+    // y se decodifique como una URL válida.
+    // Cubre redirectores que codifican el destino, ej: ?src=aHR0cHM6Ly8...
+    for (const [, v] of parsed.searchParams) {
+      if (v.length < 16) continue;
+      if (!/^[A-Za-z0-9+/=_-]+$/.test(v)) continue; // solo chars base64 válidos
+      for (const variant of [
+        v.replace(/-/g, "+").replace(/_/g, "/"),  // base64url → estándar
+        v,                                          // base64 estándar directo
+      ]) {
+        try {
+          const decoded = atob(variant);
+          if (/^https?:\/\//i.test(decoded)) {
+            new URL(decoded); // valida que sea URL bien formada
+            return decoded;
+          }
+        } catch {}
+      }
     }
   } catch {}
   return null;
@@ -721,12 +750,26 @@ document.getElementById("analyzeBtn").addEventListener("click", async () => {
     // Decodificar redirects genéricos: cualquier URL con ?url= (u otros parámetros comunes)
     // que NO sea ya un tracker conocido. Permite detectar destinos ocultos en
     // redirectores gubernamentales o corporativos (ej: smail.chaco.gob.ar).
-    const redirectInfo = new Map(); // url original → url de destino real
+    const redirectInfo = new Map(); // url original → url de destino final
     for (const url of allUrls) {
       if (!trackerInfo.has(url)) {
         const realUrl = decodeTrackerRealUrl(url);
         if (realUrl && realUrl !== url && !allUrls.includes(realUrl)) {
           redirectInfo.set(url, realUrl);
+        }
+      }
+    }
+
+    // Segundo paso: re-procesar los destinos decodificados por si también
+    // contienen una URL oculta (cadena multi-nivel).
+    // Ej: smail.gob.ar/?url=videos.guidemesupport.com/?src=<base64>
+    //   → paso 1: smail → videos
+    //   → paso 2: videos → mdayanahsan.online (al decodificar src=<base64>)
+    for (const [origUrl, destUrl] of [...redirectInfo]) {
+      if (!trackerInfo.has(destUrl)) {
+        const realUrl2 = decodeTrackerRealUrl(destUrl);
+        if (realUrl2 && realUrl2 !== destUrl) {
+          redirectInfo.set(origUrl, realUrl2); // actualizar al destino final
         }
       }
     }
