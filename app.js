@@ -812,9 +812,13 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, all
   } else if (shorteners.length > 0 || (trackerInfo && trackerInfo.size > 0)) {
     urlState = "warn";
   }
-  // Trackers y acortadores ocultan el destino real → el banner nunca puede quedar en "safe".
-  // Se aplica después del bloque de API para degradar "safe" a "warn" cuando corresponde.
-  if (urlState === "safe" && (shorteners.length > 0 || (trackerInfo && trackerInfo.size > 0))) {
+  // Trackers, acortadores y redirects genéricos ocultan o reemplazan el destino real
+  // → el banner nunca puede quedar en "safe" cuando alguno está presente.
+  if (urlState === "safe" && (
+    shorteners.length > 0 ||
+    (trackerInfo  && trackerInfo.size  > 0) ||
+    (redirectInfo && redirectInfo.size > 0)
+  )) {
     urlState = "warn";
   }
   // Suplantación via @: siempre peligrosa, sobreescribe cualquier veredicto previo.
@@ -984,13 +988,15 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
   const hasTrackers   = trackerInfo.size > 0;
   const hasShorteners = shorteners.length > 0;
 
+  const hasRedirects = redirectInfo && redirectInfo.size > 0;
+
   const state = totalDanger > 0 ? "danger"
-              : hasShorteners || hasTrackers ? "warn"
+              : hasShorteners || hasTrackers || hasRedirects ? "warn"
               : (urlResult?.verdict === "safe" ? "safe" : "warn");
 
   const label = totalDanger > 0
     ? `${totalDanger} PELIGROSA${totalDanger > 1 ? "S" : ""}`
-    : (urlResult?.verdict === "safe" && !hasTrackers && !hasShorteners ? "LIMPIAS" : "AVISO");
+    : (urlResult?.verdict === "safe" && !hasTrackers && !hasShorteners && !hasRedirects ? "LIMPIAS" : "AVISO");
 
   const section = document.createElement("div");
   section.className = `result-section ${state}`;
@@ -1022,9 +1028,12 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
     } else if (redirectRealUrl) {
       // Redirect genérico: la URL contiene un parámetro ?url= con un destino oculto
       const isRealDangerous = redirectRealResult?.verdict === "dangerous";
+      const hasDestChain    = (redirectRealResult?.redirectChain?.length ?? 0) > 0;
       cls = isRealDangerous ? "url-danger" : "url-warn";
       verdictText = isRealDangerous
         ? "⚠ REDIRIGE A URL PELIGROSA"
+        : hasDestChain
+        ? "⚡ Cadena de redirects detectada — destino final no figura en listas negras"
         : "⚡ Redirige a otro dominio (parámetro ?url=) — destino verificado";
     } else if (isShortener) {
       cls = "url-warn";
@@ -1075,7 +1084,10 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
       }
     }
 
-    // Bloque inline del destino decodificado para redirects genéricos
+    // Bloque inline del destino decodificado para redirects genéricos.
+    // Incluye también la cadena de redirects HTTP posterior descubierta por el servidor
+    // (redirectRealResult.redirectChain), para que el destino final sea siempre visible
+    // aunque no figure todavía en ninguna base de datos de amenazas.
     let redirectBlock = "";
     if (redirectRealUrl) {
       let rColor, rText;
@@ -1085,11 +1097,27 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
         rText  = "⚠ " + (threats || "AMENAZA DETECTADA en destino");
       } else if (redirectRealResult?.verdict === "safe") {
         rColor = "var(--accent)";
-        rText  = "✓ Sin amenazas en el destino";
+        rText  = "✓ Sin amenazas en el destino (según bases de datos actuales)";
       } else {
         rColor = "var(--muted)";
         rText  = "? Sin verificar";
       }
+
+      // Saltos HTTP subsiguientes del destino decodificado
+      // Ej: videos.guidemesupport.com → mdayanahsan.online/amez/
+      const destHops = redirectRealResult?.redirectChain ?? [];
+      const hopChainHtml = destHops.length > 0
+        ? `<div style="margin-top:6px;font-family:var(--mono);font-size:10px;
+                       color:var(--muted);letter-spacing:.3px;text-transform:uppercase">
+             Saltos HTTP descubiertos por el servidor:
+           </div>` +
+          destHops.map(hopUrl => `
+            <div style="margin-top:3px;padding-left:8px;border-left:2px solid var(--border);
+                        font-family:var(--mono);font-size:10px;color:var(--muted)">
+              ↳ ${esc(hopUrl)}
+            </div>`).join("")
+        : "";
+
       redirectBlock = `
         <div style="margin-top:8px;padding:8px 10px;border-radius:6px;
                     border:1px solid var(--border);background:rgba(0,0,0,.25)">
@@ -1102,6 +1130,7 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
           </div>
           <div style="font-family:var(--mono);font-size:11px;font-weight:700;
                       color:${rColor}">${esc(rText)}</div>
+          ${hopChainHtml}
         </div>`;
     }
 
