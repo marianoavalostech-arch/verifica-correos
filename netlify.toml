@@ -40,4 +40,4 @@
     # - connect-src usa https: porque rdap.org responde con un redirect 302 al
     #   servidor RDAP del registro correspondiente (rdap.verisign.com, etc.),
     #   imposible de enumerar de antemano; la CSP valida cada salto del redirect.
-    Content-Security-Policy    = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https:; img-src 'sel
+    Content-Security-Policy    = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https:; img-src 'self' data:; frame-ancestors 'none'"
