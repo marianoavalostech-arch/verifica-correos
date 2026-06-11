@@ -227,12 +227,31 @@ async function queryThreatFox(url, authKey) {
     if ((data.query_status ?? "no_results") !== "ok") return [];
     if (!Array.isArray(data.data) || data.data.length === 0) return [];
 
+    // PRECISIÓN: search_ioc devuelve coincidencias parciales (p. ej. buscar
+    // "example.com" trae IOCs que solo *mencionan* ese dominio). Para evitar
+    // falsos positivos, solo se acepta el IOC si su host coincide EXACTAMENTE
+    // con el hostname consultado. Formatos de IOC: "dominio", "host:puerto",
+    // "ip:puerto" o URL completa.
+    const target = hostname.toLowerCase();
+    const matches = data.data.filter((entry) => {
+      const ioc = String(entry?.ioc ?? "").toLowerCase().trim();
+      if (!ioc) return false;
+      if (ioc === target) return true;
+      try {
+        const u = new URL(ioc.includes("://") ? ioc : "http://" + ioc);
+        return u.hostname === target;
+      } catch {
+        return false;
+      }
+    });
+    if (matches.length === 0) return [];
+
     const map = {
       botnet_cc:        "THREATFOX_BOTNET",
       payload_delivery: "THREATFOX_MALWARE",
       phishing:         "THREATFOX_PHISHING",
     };
-    const threatType = data.data[0]?.threat_type ?? "";
+    const threatType = matches[0]?.threat_type ?? "";
     return [map[threatType] ?? "THREATFOX_MALWARE"];
   } catch {
     return [];
