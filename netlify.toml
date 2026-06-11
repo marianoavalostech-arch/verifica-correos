@@ -12,7 +12,8 @@
 #   4. Haz redeploy.
 
 [build]
-  publish  = "."               # index.html está en la raíz
+  publish  = "public"          # solo el frontend; README, package.json y
+                               # .env.example quedan fuera del sitio servido
   functions = "netlify/functions"
 
 [build.environment]
@@ -21,12 +22,9 @@
 [functions]
   node_bundler = "esbuild"     # bundler rápido, soporta ESM
 
-# ── Redirect: /check → función serverless ────────────────────────────────────
-[[redirects]]
-  from   = "/check"
-  to     = "/.netlify/functions/check"
-  status = 200
-  force  = true
+# Nota: la ruta /check y el rate limiting (20 req/min por IP) los define la
+# propia función en `export const config` (netlify/functions/check.mjs,
+# Functions v2). Ya no se necesita un [[redirects]] aquí.
 
 # ── Cabeceras de seguridad ────────────────────────────────────────────────────
 [[headers]]
@@ -42,4 +40,4 @@
     # - connect-src usa https: porque rdap.org responde con un redirect 302 al
     #   servidor RDAP del registro correspondiente (rdap.verisign.com, etc.),
     #   imposible de enumerar de antemano; la CSP valida cada salto del redirect.
-    Content-Security-Policy    = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https:; img-src 'self' data:; frame-ancestors 'none'"
+    Content-Security-Policy    = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https:; img-src 'sel
