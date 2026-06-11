@@ -83,6 +83,22 @@
     <button class="btn-secondary" id="clearBtn" type="button">✕ Limpiar todo</button>
   </div>
 
+  <!-- ── Adjuntar archivo ── -->
+  <div class="divider">o analiza un archivo adjunto</div>
+  <div class="field-group">
+    <label class="field-label" for="fileInput">
+      📎 Archivo adjunto <span class="opt">opcional · máx. 25&nbsp;MB · análisis 100% local</span>
+    </label>
+    <div class="file-drop">
+      <input id="fileInput" type="file">
+      <button class="btn-secondary" id="fileBtn" type="button">📎 Elegir archivo</button>
+      <span class="file-name" id="fileName">Ningún archivo seleccionado</span>
+    </div>
+    <div class="file-hint">
+      El archivo nunca se sube a internet: se analiza en tu navegador (hash, tipo real, macros, scripts ocultos).
+    </div>
+  </div>
+
   <!-- ── Resultados ── -->
   <div id="results"></div>
 
@@ -101,6 +117,20 @@
     <a href="https://github.com/marianoavalostech-arch/verifica-correos" target="_blank" rel="noopener noreferrer">Ver en GitHub</a>
   </div>
 
+</div>
+
+<!-- ── Modal de análisis de archivo ── -->
+<div class="modal-overlay" id="fileModalOverlay" hidden>
+  <div class="modal" id="fileModal" role="dialog" aria-modal="true" aria-labelledby="fileModalTitle">
+    <div class="modal-header">
+      <h2 id="fileModalTitle">Analizando archivo…</h2>
+      <button class="modal-close" id="fileModalClose" type="button" aria-label="Cerrar">✕</button>
+    </div>
+    <div class="modal-body">
+      <ul class="checklist" id="fileChecklist"></ul>
+      <div id="fileReport"></div>
+    </div>
+  </div>
 </div>
 
 <script src="/app.js" defer></script>

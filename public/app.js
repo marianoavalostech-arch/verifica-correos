@@ -845,6 +845,203 @@ document.getElementById("exampleBtn").addEventListener("click", () => {
   updateCharCounter();
 });
 
+// ═══════════════════════════════════════════════════════
+//  Análisis de archivos adjuntos (100% local, Web Worker)
+// ═══════════════════════════════════════════════════════
+
+const FILE_STEPS = [
+  { id: "read",      label: "Cargar el archivo en memoria (sandbox aislado, sin escribir a disco)" },
+  { id: "size",      label: "Verificar que el tamaño esté dentro del límite seguro" },
+  { id: "hash",      label: "Calcular hash SHA-256" },
+  { id: "magic",     label: "Detectar el tipo real del archivo (firma binaria)" },
+  { id: "extmatch",  label: "Comparar el tipo real con la extensión declarada" },
+  { id: "structure", label: "Analizar la estructura interna (ZIP / PDF / OLE)" },
+  { id: "macros",    label: "Buscar macros, scripts o contenido activo embebido" },
+  { id: "report",    label: "Generar el informe final" },
+];
+
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const FILE_ANALYSIS_TIMEOUT_MS = 20000;
+
+let activeFileWorker = null;
+
+function fmtSizeUI(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / (1024 * 1024)).toFixed(2) + " MB";
+}
+
+function openFileModal() {
+  document.getElementById("fileModalOverlay").hidden = false;
+  document.body.style.overflow = "hidden";
+}
+
+function closeFileModal() {
+  document.getElementById("fileModalOverlay").hidden = true;
+  document.body.style.overflow = "";
+  if (activeFileWorker) {
+    activeFileWorker.terminate();
+    activeFileWorker = null;
+  }
+}
+
+function renderChecklist() {
+  const ul = document.getElementById("fileChecklist");
+  ul.innerHTML = FILE_STEPS.map(s => `
+    <li id="step-${esc(s.id)}" class="pending">
+      <span class="chk-icon">○</span>
+      <span class="chk-label">${esc(s.label)}<span class="chk-detail" id="detail-${esc(s.id)}"></span></span>
+    </li>`).join("");
+}
+
+const STEP_ICONS = { ok: "✓", warn: "!", danger: "✕" };
+
+function updateChecklistStep(id, status, detail) {
+  const li = document.getElementById(`step-${id}`);
+  if (!li) return;
+  li.className = status;
+  if (status !== "pending") {
+    li.querySelector(".chk-icon").textContent = STEP_ICONS[status] || "✓";
+  }
+  if (detail) {
+    document.getElementById(`detail-${id}`).textContent = detail;
+  }
+}
+
+function renderFileReport(report) {
+  const el = document.getElementById("fileReport");
+  if (!report) { el.innerHTML = ""; return; }
+  const { meta, issues = [], overall = "ok", aborted } = report;
+
+  const bannerText = aborted
+    ? "Análisis interrumpido"
+    : overall === "danger" ? "PELIGRO — se detectaron señales de riesgo importantes"
+    : overall === "warn"   ? "ADVERTENCIA — hay señales que requieren precaución"
+    : "Sin señales de riesgo evidentes en el análisis local";
+
+  const bannerClass = aborted ? "danger" : overall;
+
+  let html = `<div class="file-report-banner ${bannerClass}">${esc(bannerText)}</div>`;
+
+  if (meta) {
+    html += `<dl class="file-report-grid">
+      <dt>Nombre</dt><dd>${esc(meta.name ?? "")}</dd>
+      ${meta.size != null ? `<dt>Tamaño</dt><dd>${esc(fmtSizeUI(meta.size))}</dd>` : ""}
+      ${meta.detectedType ? `<dt>Tipo real detectado</dt><dd>${esc(meta.detectedType)}</dd>` : ""}
+      ${meta.zipKind ? `<dt>Formato</dt><dd>${esc(meta.zipKind)}</dd>` : ""}
+      ${meta.declaredType ? `<dt>Tipo declarado por el navegador</dt><dd>${esc(meta.declaredType)}</dd>` : ""}
+      ${meta.sha256 ? `<dt>SHA-256</dt><dd>${esc(meta.sha256)}</dd>` : ""}
+    </dl>`;
+  }
+
+  if (issues.length) {
+    html += `<ul class="file-report-issues">
+      ${issues.map(i => `<li class="${esc(i.level)}">${esc(i.text)}</li>`).join("")}
+    </ul>`;
+  } else if (!aborted) {
+    html += `<div style="font-size:12px;color:var(--muted)">
+      No se encontraron extensiones engañosas, macros, ejecutables embebidos ni contenido activo en el análisis local.
+      Esto no garantiza que el archivo sea inofensivo — sigue siendo recomendable no abrirlo si no esperabas recibirlo.
+    </div>`;
+  }
+
+  if (meta?.sha256 && meta.sha256 !== "(no disponible)") {
+    html += `<div style="margin-top:12px;font-size:11px;color:var(--muted);line-height:1.5">
+      Podés buscar este hash en
+      <a href="https://www.virustotal.com/gui/file/${esc(meta.sha256)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">VirusTotal</a>
+      para ver si algún antivirus lo identifica como malware (esto sí consulta un servicio externo).
+    </div>`;
+  }
+
+  el.innerHTML = html;
+}
+
+function startFileAnalysis(file) {
+  document.getElementById("fileModalTitle").textContent = `Analizando: ${file.name}`;
+  renderChecklist();
+  document.getElementById("fileReport").innerHTML = "";
+  openFileModal();
+
+  if (file.size > MAX_FILE_BYTES) {
+    updateChecklistStep("read", "danger", "No iniciado");
+    FILE_STEPS.slice(1).forEach(s => updateChecklistStep(s.id, "danger", "Omitido"));
+    renderFileReport({
+      meta: { name: file.name, size: file.size },
+      issues: [{ level: "danger", text: `El archivo pesa ${fmtSizeUI(file.size)} y supera el límite de ${fmtSizeUI(MAX_FILE_BYTES)}. No se analizó.` }],
+      overall: "danger",
+      aborted: true,
+    });
+    return;
+  }
+
+  const worker = new Worker("/file-worker.js");
+  activeFileWorker = worker;
+
+  const timeout = setTimeout(() => {
+    worker.terminate();
+    if (activeFileWorker === worker) activeFileWorker = null;
+    document.querySelectorAll("#fileChecklist li.pending").forEach(li => {
+      li.className = "danger";
+      li.querySelector(".chk-icon").textContent = "✕";
+    });
+    renderFileReport({
+      meta: { name: file.name, size: file.size },
+      issues: [{ level: "danger", text: "El análisis tardó demasiado y fue cancelado por seguridad." }],
+      overall: "danger",
+      aborted: true,
+    });
+  }, FILE_ANALYSIS_TIMEOUT_MS);
+
+  worker.onmessage = (e) => {
+    const msg = e.data;
+    if (msg.type === "step") {
+      updateChecklistStep(msg.id, msg.status, msg.detail);
+    } else if (msg.type === "result") {
+      clearTimeout(timeout);
+      renderFileReport(msg.report);
+      worker.terminate();
+      if (activeFileWorker === worker) activeFileWorker = null;
+    }
+  };
+
+  worker.onerror = (err) => {
+    clearTimeout(timeout);
+    document.querySelectorAll("#fileChecklist li.pending").forEach(li => {
+      li.className = "danger";
+      li.querySelector(".chk-icon").textContent = "✕";
+    });
+    renderFileReport({
+      meta: { name: file.name, size: file.size },
+      issues: [{ level: "danger", text: "Ocurrió un error durante el análisis: " + (err.message || "desconocido") }],
+      overall: "danger",
+      aborted: true,
+    });
+    worker.terminate();
+    if (activeFileWorker === worker) activeFileWorker = null;
+  };
+
+  worker.postMessage({ file });
+}
+
+document.getElementById("fileBtn").addEventListener("click", () => {
+  document.getElementById("fileInput").click();
+});
+
+document.getElementById("fileInput").addEventListener("change", (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  document.getElementById("fileName").textContent = `${file.name} (${fmtSizeUI(file.size)})`;
+  startFileAnalysis(file);
+});
+
+document.getElementById("fileModalClose").addEventListener("click", closeFileModal);
+document.getElementById("fileModalOverlay").addEventListener("click", (e) => {
+  if (e.target.id === "fileModalOverlay") closeFileModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !document.getElementById("fileModalOverlay").hidden) closeFileModal();
+});
+
 // Botón limpiar
 document.getElementById("clearBtn").addEventListener("click", () => {
   ["senderInput","subjectInput","bodyInput","urlInput"].forEach(id => {
@@ -852,6 +1049,8 @@ document.getElementById("clearBtn").addEventListener("click", () => {
   });
   document.getElementById("vtToggle").checked = false;
   document.getElementById("results").innerHTML = "";
+  document.getElementById("fileInput").value = "";
+  document.getElementById("fileName").textContent = "Ningún archivo seleccionado";
   updateCharCounter();
 });
 

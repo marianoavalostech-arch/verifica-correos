@@ -440,4 +440,180 @@
       from { opacity: 0; transform: translateY(6px); }
       to   { opacity: 1; transform: none; }
     }
+
+    /* ── Adjuntar archivo ── */
+    .file-drop {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .file-drop input[type="file"] {
+      position: absolute;
+      width: 1px; height: 1px;
+      padding: 0; margin: -1px;
+      overflow: hidden;
+      clip: rect(0,0,0,0);
+      white-space: nowrap;
+      border: 0;
+    }
+    #fileBtn { flex: none; }
+    .file-name {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      word-break: break-all;
+    }
+    .file-hint {
+      margin-top: 8px;
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    /* ── Modal ── */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(5,8,13,.7);
+      backdrop-filter: blur(2px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 100;
+    }
+    .modal-overlay[hidden] { display: none; }
+    .modal {
+      width: 100%;
+      max-width: 520px;
+      max-height: 85vh;
+      overflow-y: auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 24px 60px rgba(0,0,0,.5);
+      animation: rise .2s ease-out;
+    }
+    .modal-header {
+      position: sticky;
+      top: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 18px 20px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+    }
+    .modal-header h2 {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: .2px;
+    }
+    .modal-close {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: 7px;
+      width: 28px; height: 28px;
+      flex-shrink: 0;
+      cursor: pointer;
+      font-size: 13px;
+      transition: color .15s, border-color .15s;
+    }
+    .modal-close:hover { color: var(--text); border-color: var(--muted); }
+    .modal-body { padding: 18px 20px 22px; }
+
+    /* ── Checklist de análisis ── */
+    .checklist {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .checklist li {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--muted);
+      animation: rise .2s ease-out;
+    }
+    .checklist li .chk-icon {
+      flex-shrink: 0;
+      width: 16px; height: 16px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      margin-top: 1px;
+    }
+    .checklist li.pending .chk-icon {
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      animation: spin .6s linear infinite;
+    }
+    .checklist li.ok .chk-icon { background: rgba(94,230,168,.15); color: var(--accent); border-color: transparent; }
+    .checklist li.warn .chk-icon { background: rgba(255,200,87,.15); color: var(--warn); border-color: transparent; }
+    .checklist li.danger .chk-icon { background: rgba(255,92,108,.15); color: var(--danger); border-color: transparent; }
+    .checklist li.ok .chk-label,
+    .checklist li.warn .chk-label,
+    .checklist li.danger .chk-label { color: var(--text); }
+    .checklist li.warn .chk-label { color: var(--warn); }
+    .checklist li.danger .chk-label { color: var(--danger); }
+    .chk-detail {
+      display: block;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--muted);
+      margin-top: 2px;
+      word-break: break-all;
+    }
+
+    /* ── Informe del archivo ── */
+    .file-report-banner {
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-weight: 700;
+      font-size: 13px;
+      margin-bottom: 14px;
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .file-report-banner.ok     { border-color: rgba(94,230,168,.35);  background: rgba(94,230,168,.06);  color: var(--accent); }
+    .file-report-banner.warn   { border-color: rgba(255,200,87,.35); background: rgba(255,200,87,.06); color: var(--warn); }
+    .file-report-banner.danger { border-color: rgba(255,92,108,.35); background: rgba(255,92,108,.06); color: var(--danger); }
+
+    .file-report-grid {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 12px;
+      font-size: 12px;
+      margin-bottom: 14px;
+    }
+    .file-report-grid dt { color: var(--muted); }
+    .file-report-grid dd { font-family: var(--mono); word-break: break-all; }
+
+    .file-report-issues {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .file-report-issues li {
+      font-size: 12px;
+      padding: 8px 10px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: rgba(0,0,0,.15);
+    }
+    .file-report-issues li.warn   { color: var(--warn);   border-color: rgba(255,200,87,.25); }
+    .file-report-issues li.danger { color: var(--danger); border-color: rgba(255,92,108,.25); }
     @keyframes spin { to { transform: rotate(360deg); } }
