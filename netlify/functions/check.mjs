@@ -1,5 +1,5 @@
 /**
- * Verifica Correos — Función serverless para Netlify
+ * Verifica Correos — Función serverless para Netlify (Functions v2, ESM)
  *
  * Fuentes de verificación (consultadas en paralelo):
  *   1. URLhaus / abuse.ch        — requiere ABUSECH_AUTH_KEY (gratuita, auth.abuse.ch)
@@ -13,8 +13,14 @@
  * Recibe { url } o { urls: [...] }
  * Devuelve { verdict, results, source, note }
  *
- * Endpoint: /.netlify/functions/check  ->  alias /check (netlify.toml)
+ * Endpoint: /check (definido en `config.path`, sin redirect en netlify.toml).
+ *
+ * MIGRACIÓN A V2: la sintaxis v1 (exports.handler) ignoraba `exports.config`,
+ * por lo que el rate limiting nunca se aplicaba. Con v2 (export default +
+ * export const config) Netlify sí registra la regla de rate limit.
  */
+
+import { promises as dns } from "node:dns";
 
 const GSB_ENDPOINT    = "https://safebrowsing.googleapis.com/v4/threatMatches:find";
 const URLHAUS_URL     = "https://urlhaus-api.abuse.ch/v1/url/";
@@ -31,6 +37,13 @@ const GSB_THREAT_TYPES = [
 // SEGURIDAD: ALLOWED_ORIGIN debe configurarse en producción.
 // Sin ella, cualquier sitio puede llamar a este endpoint y abusar de las API keys.
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
+if (!process.env.ALLOWED_ORIGIN) {
+  console.warn(
+    "[seguridad] ALLOWED_ORIGIN no está configurada: el endpoint /check " +
+    "acepta peticiones CORS desde CUALQUIER origen. Configúrala en " +
+    "Site settings → Environment variables antes de usar en producción."
+  );
+}
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
@@ -45,8 +58,6 @@ const VALID_URL_RE = /^https?:\/\/.{3,2000}$/;
 // followRedirects() hace fetch desde el servidor a URLs controladas por el
 // usuario. Sin este filtro, una URL como http://169.254.169.254/ o
 // http://localhost:8080/ haría que la función consulte servicios internos.
-
-const dns = require("node:dns").promises;
 
 function isPrivateIp(ip) {
   // IPv4
@@ -188,7 +199,7 @@ async function queryUrlhaus(url, authKey) {
 
 /**
  * ThreatFox (abuse.ch) — base de datos de IOCs (dominios e IPs maliciosas).
- * Consulta por hostname extraído de la URL, sin clave de API.
+ * Consulta por hostname extraído de la URL.
  * Cubre infraestructura de C2, distribución de malware y phishing.
  */
 async function queryThreatFox(url, authKey) {
@@ -322,38 +333,36 @@ async function followRedirects(startUrl, maxHops = 3) {
   return chain;
 }
 
-// --- Handler principal ---
+// --- Helper de respuesta JSON (API Response de Functions v2) ---
 
-exports.handler = async function (event) {
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers: CORS_HEADERS };
+function json(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+  });
+}
+
+// --- Handler principal (Netlify Functions v2) ---
+
+export default async function handler(req) {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
-  if (event.httpMethod !== "POST") {
-    return {
-      statusCode: 405,
-      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "Method not allowed" }),
-    };
+  if (req.method !== "POST") {
+    return json({ error: "Method not allowed" }, 405);
   }
 
   // SEGURIDAD: rechazar payloads excesivamente grandes antes de parsear.
-  if ((event.body || "").length > MAX_BODY_SIZE) {
-    return {
-      statusCode: 413,
-      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "Payload demasiado grande" }),
-    };
+  const rawBody = await req.text();
+  if (rawBody.length > MAX_BODY_SIZE) {
+    return json({ error: "Payload demasiado grande" }, 413);
   }
 
   let body;
   try {
-    body = JSON.parse(event.body || "{}");
+    body = JSON.parse(rawBody || "{}");
   } catch {
-    return {
-      statusCode: 400,
-      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "JSON invalido" }),
-    };
+    return json({ error: "JSON invalido" }, 400);
   }
 
   const rawUrls = Array.isArray(body.urls)
@@ -368,11 +377,10 @@ exports.handler = async function (event) {
   );
 
   if (urls.length === 0) {
-    return {
-      statusCode: 400,
-      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "Se requiere el campo url o urls (con protocolo http/https)" }),
-    };
+    return json(
+      { error: "Se requiere el campo url o urls (con protocolo http/https)" },
+      400
+    );
   }
 
   const batch     = urls.slice(0, MAX_URLS);
@@ -460,17 +468,18 @@ exports.handler = async function (event) {
     note += " Para mayor cobertura, configura GOOGLE_SAFE_BROWSING_KEY y ABUSECH_AUTH_KEY (ambas gratuitas).";
   }
 
-  return respond({
+  return json({
     verdict: anyDangerous ? "dangerous" : "safe",
     results,
     source: sourceStr,
     note,
   });
-};
+}
 
-// --- Rate limiting (plan gratuito: hasta 2 reglas por proyecto) ---
+// --- Configuración: ruta + rate limiting ------------------------------------
+// Con Functions v2 esta configuración SÍ se registra (en v1 se ignoraba).
 // 20 requests/min por IP ≈ protege la cuota diaria de Google Safe Browsing (~10 000 req/día).
-exports.config = {
+export const config = {
   path: "/check",
   rateLimit: {
     windowLimit: 20,
@@ -478,12 +487,3 @@ exports.config = {
     aggregateBy: ["ip", "domain"],
   },
 };
-
-// --- Helper ---
-function respond(body) {
-  return {
-    statusCode: 200,
-    headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  };
-}
