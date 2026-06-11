@@ -64,14 +64,23 @@ function isPrivateIp(ip) {
   const m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
   if (m) {
     const [a, b] = [Number(m[1]), Number(m[2])];
+    if ([a, b, Number(m[3]), Number(m[4])].some((n) => n > 255)) return true; // octeto inválido → bloquear
     return (
       a === 0 || a === 10 || a === 127 ||
       (a === 100 && b >= 64 && b <= 127) ||   // CGNAT 100.64/10
       (a === 169 && b === 254) ||             // link-local / metadata
       (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
+      (a === 192 && (b === 168 || b === 0)) || // 192.168/16 y 192.0.0.0/24
+      (a === 198 && (b === 18 || b === 19)) || // benchmarking 198.18.0.0/15
       a >= 224                                 // multicast / reservado
     );
+  }
+  // Formas alternativas de IPv4 (decimal, octal, hex, con menos de 4 octetos,
+  // ej. "127.1", "0x7f.1", "2130706433") que algunos resolutores aceptan
+  // como loopback/privadas. Si el host parece numérico pero no es un IPv4
+  // de 4 octetos válido, lo tratamos como sospechoso y lo bloqueamos.
+  if (/^(0x[0-9a-f]+|0[0-7]*|[1-9]\d*)(\.(0x[0-9a-f]+|0[0-7]*|[1-9]\d*|0)){0,3}$/i.test(ip)) {
+    return true;
   }
   // IPv6 (forma normalizada de Node)
   const v6 = ip.toLowerCase();
@@ -80,7 +89,11 @@ function isPrivateIp(ip) {
     v6.startsWith("fe80") ||                  // link-local
     v6.startsWith("fc") || v6.startsWith("fd") || // ULA fc00::/7
     v6.startsWith("::ffff:127.") || v6.startsWith("::ffff:10.") ||
-    v6.startsWith("::ffff:192.168.") || v6.startsWith("::ffff:169.254.")
+    v6.startsWith("::ffff:192.168.") || v6.startsWith("::ffff:169.254.") ||
+    v6.startsWith("::ffff:192.0.0.") ||
+    v6.startsWith("::ffff:100.") ||           // CGNAT 100.64/10 (mapeado)
+    /^::ffff:172\.(1[6-9]|2\d|3[01])\./.test(v6) || // 172.16-31/12 (mapeado)
+    /^::ffff:198\.(18|19)\./.test(v6)         // benchmarking (mapeado)
   );
 }
 
@@ -122,6 +135,28 @@ const MAX_BODY_SIZE      = 50_000;
 // Cap de seguridad: evita que redirect expansion genere cientos de requests a abuse.ch.
 // En el peor caso teórico: 100 URLs × 3 saltos = 300; el cap lo acota a este valor.
 const MAX_ALLCHECK_URLS  = 300;
+// Concurrencia máxima hacia cada API externa (URLhaus/ThreatFox/VirusTotal).
+// Evita disparar hasta MAX_ALLCHECK_URLS peticiones simultáneas con la misma
+// API key, lo que podría agotar cuotas o activar throttling/baneo temporal.
+const EXTERNAL_API_CONCURRENCY = 10;
+
+/**
+ * Aplica `fn` a cada elemento de `items`, ejecutando como máximo `limit`
+ * llamadas en paralelo. El orden del array resultado coincide con `items`.
+ */
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, worker);
+  await Promise.all(workers);
+  return results;
+}
 
 // --- Funciones de consulta por fuente ---
 
@@ -293,18 +328,25 @@ async function queryVirusTotal(url, apiKey) {
  * Intenta HEAD primero (sin body); si el servidor bloquea HEAD (405/400/error)
  * o devuelve 2xx sin redirigir, reintenta con GET + redirect:"manual".
  * Con redirect:"manual" el body nunca se descarga para respuestas 3xx.
- * Devuelve la cadena completa: [urlOriginal, salto1, salto2, ...].
+ * Devuelve { chain, unsafeUrls }: `chain` es la secuencia completa
+ * [urlOriginal, salto1, salto2, ...] (para mostrarla al usuario), y
+ * `unsafeUrls` contiene los saltos que apuntan a hosts privados/internos
+ * y que por tanto NO deben enviarse a las APIs externas de amenazas.
  */
 async function followRedirects(startUrl, maxHops = 3) {
   const BROWSER_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-  const chain   = [startUrl];
-  let current   = startUrl;
+  const chain      = [startUrl];
+  const unsafeUrls = [];
+  let current      = startUrl;
 
   // SEGURIDAD: nunca hacer fetch a hosts internos o IPs privadas (SSRF).
-  if (!(await isSafePublicUrl(startUrl))) return chain;
+  if (!(await isSafePublicUrl(startUrl))) {
+    unsafeUrls.push(startUrl);
+    return { chain, unsafeUrls };
+  }
 
   for (let i = 0; i < maxHops; i++) {
     let location = null;
@@ -343,13 +385,17 @@ async function followRedirects(startUrl, maxHops = 3) {
     try { next = new URL(location, current).href; } catch { break; }
     if (chain.includes(next)) break;     // evitar ciclos
     if (!VALID_URL_RE.test(next)) break; // solo http/https
-    // SEGURIDAD: el salto se registra en la cadena (para mostrarlo y verificarlo
-    // contra las APIs), pero si apunta a un host privado no se sigue (SSRF).
+    // SEGURIDAD: el salto se registra en la cadena (para mostrarlo), pero si
+    // apunta a un host privado/interno no se sigue (SSRF) NI se envía a las
+    // APIs externas de amenazas (se marca en `unsafeUrls`).
     chain.push(next);
-    if (!(await isSafePublicUrl(next))) break;
+    if (!(await isSafePublicUrl(next))) {
+      unsafeUrls.push(next);
+      break;
+    }
     current = next;
   }
-  return chain;
+  return { chain, unsafeUrls };
 }
 
 // --- Helper de respuesta JSON (API Response de Functions v2) ---
@@ -420,26 +466,35 @@ export default async function handler(req) {
 
   // Seguir redirects HTTP para detectar cadenas multi-salto
   // (ej: redirector corporativo → landing → página de phishing real).
-  const redirectChainMap = new Map(); // url original → [url, salto1, salto2, ...]
+  const redirectChainMap = new Map(); // url original → { chain, unsafeUrls }
+  const unsafeUrlSet     = new Set(); // saltos a hosts privados/internos (no se consultan)
   await Promise.all(
     batch.map(async (url) => {
-      redirectChainMap.set(url, await followRedirects(url));
+      const result = await followRedirects(url);
+      redirectChainMap.set(url, result);
+      for (const u of result.unsafeUrls) unsafeUrlSet.add(u);
     })
   );
 
-  // URLs únicas a verificar: originales + todos los saltos descubiertos.
+  // URLs únicas a verificar: originales + todos los saltos descubiertos,
+  // excluyendo los que apuntan a hosts privados/internos (SSRF).
   // Se aplica MAX_ALLCHECK_URLS para acotar el número de requests a las APIs externas.
   const allCheckUrls = [...new Set(
-    batch.concat([...redirectChainMap.values()].flat())
-  )].slice(0, MAX_ALLCHECK_URLS);
+    batch.concat([...redirectChainMap.values()].flatMap((r) => r.chain))
+  )]
+    .filter((u) => !unsafeUrlSet.has(u))
+    .slice(0, MAX_ALLCHECK_URLS);
 
+  // SEGURIDAD: las consultas a APIs externas se limitan con mapLimit
+  // (EXTERNAL_API_CONCURRENCY peticiones simultaneas como maximo) para no
+  // agotar ni abusar de las cuotas compartidas.
   const [gsbMatches, urlhausAll, threatfoxAll, vtAll] = await Promise.all([
     GSB_KEY
       ? queryGSB(allCheckUrls, GSB_KEY)
       : Promise.resolve([]),
-    Promise.all(allCheckUrls.map((u) => queryUrlhaus(u, ABUSECH_KEY))),
-    Promise.all(allCheckUrls.map((u) => queryThreatFox(u, ABUSECH_KEY))),
-    Promise.all(allCheckUrls.map((u) => queryVirusTotal(u, VT_KEY))),
+    mapLimit(allCheckUrls, EXTERNAL_API_CONCURRENCY, (u) => queryUrlhaus(u, ABUSECH_KEY)),
+    mapLimit(allCheckUrls, EXTERNAL_API_CONCURRENCY, (u) => queryThreatFox(u, ABUSECH_KEY)),
+    mapLimit(allCheckUrls, EXTERNAL_API_CONCURRENCY, (u) => queryVirusTotal(u, VT_KEY)),
   ]);
 
   // Mapa url → threats[] para búsqueda rápida en toda la cadena
@@ -459,7 +514,7 @@ export default async function handler(req) {
   }
 
   const results = batch.map((url) => {
-    const chain   = redirectChainMap.get(url) || [url];
+    const chain   = redirectChainMap.get(url)?.chain || [url];
     const threats = [...new Set(chain.flatMap(u => threatsByUrl.get(u) || []))];
     const redirectHops = chain.slice(1);
     return {
