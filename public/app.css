@@ -447,6 +447,15 @@
       align-items: center;
       gap: 10px;
       flex-wrap: wrap;
+      border: 1px dashed transparent;
+      border-radius: 9px;
+      padding: 6px 8px;
+      margin: -6px -8px;
+      transition: border-color .15s, background .15s;
+    }
+    .file-drop.drag-active {
+      border-color: var(--accent);
+      background: rgba(94,230,168,.06);
     }
     .file-drop input[type="file"] {
       position: absolute;

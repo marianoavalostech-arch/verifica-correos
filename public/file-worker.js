@@ -136,7 +136,6 @@ async function analyze(file) {
   const meta = { name: file.name, size: file.size, declaredType: file.type || "(desconocido)" };
 
   // Paso 1: lectura en memoria
-  step("read", "start");
   let buf;
   try {
     buf = await file.arrayBuffer();
@@ -149,7 +148,6 @@ async function analyze(file) {
   step("read", "ok", `${fmtSize(bytes.length)} cargados en memoria (no se escribió a disco)`);
 
   // Paso 2: tamaño
-  step("size", "start");
   if (bytes.length > MAX_BYTES) {
     step("size", "danger", `${fmtSize(bytes.length)} supera el límite de ${fmtSize(MAX_BYTES)}`);
     postMessage({ type: "result", report: { meta, issues: [{ level: "danger", text: `Archivo demasiado grande (${fmtSize(bytes.length)}). Análisis abortado por seguridad.` }], aborted: true } });
@@ -158,7 +156,6 @@ async function analyze(file) {
   step("size", "ok", `${fmtSize(bytes.length)} (dentro del límite de ${fmtSize(MAX_BYTES)})`);
 
   // Paso 3: hash SHA-256
-  step("hash", "start");
   let sha256 = "(no disponible)";
   try {
     const digest = await crypto.subtle.digest("SHA-256", buf);
@@ -170,30 +167,51 @@ async function analyze(file) {
   meta.sha256 = sha256;
 
   // Paso 4: magic bytes
-  step("magic", "start");
   const magic = detectMagic(bytes);
   meta.detectedType = magic.label;
   meta.detectedFamily = magic.family;
   step("magic", "ok", magic.label + (magic.hex ? ` (firma: ${bytesToHex(bytes.slice(0, magic.hex.length / 2).buffer)})` : ""));
 
-  // Paso 5: extensión vs tipo real
-  step("extmatch", "start");
+  // Paso 5: extensión vs tipo real + detección de doble extensión
   const ext = (file.name.split(".").pop() || "").toLowerCase();
   const expectedFamily = EXT_FAMILIES[ext];
   meta.extension = ext || "(sin extensión)";
+
+  let extStatus = "ok";
+  let extDetail = "El tipo real coincide con lo esperado para esta extensión";
+
   if (magic.family === "exe" || magic.family === "elf" || magic.family === "macho") {
     issues.push({ level: "danger", text: `El contenido real es un EJECUTABLE (${magic.label}), independientemente de su extensión ".${ext || "?"}". Riesgo muy alto: no lo abras.` });
-    step("extmatch", "danger", "Ejecutable disfrazado o archivo .exe/.dll directo");
+    extStatus = "danger";
+    extDetail = "Ejecutable disfrazado o archivo .exe/.dll directo";
   } else if (expectedFamily && magic.family !== "binary" && magic.family !== expectedFamily &&
              !(expectedFamily === "text" && magic.family === "text")) {
     issues.push({ level: "warn", text: `La extensión ".${ext}" sugiere "${expectedFamily}", pero el contenido real es "${magic.label}". Posible intento de disfrazar el archivo.` });
-    step("extmatch", "warn", `.${ext} → se esperaba ${expectedFamily}, se detectó ${magic.family}`);
-  } else {
-    step("extmatch", "ok", "El tipo real coincide con lo esperado para esta extensión");
+    extStatus = "warn";
+    extDetail = `.${ext} → se esperaba ${expectedFamily}, se detectó ${magic.family}`;
   }
 
+  // Detectar doble extensión en el nombre del archivo (ej: "factura.pdf.exe")
+  // Técnica habitual para disfrazar ejecutables como documentos de apariencia inocua.
+  const SAFE_LIKE_EXTS = new Set(["pdf","doc","docx","xls","xlsx","ppt","pptx",
+                                   "jpg","jpeg","png","gif","txt","zip","rar"]);
+  const nameParts = file.name.split(".");
+  if (nameParts.length > 2) {
+    const secondToLast = nameParts[nameParts.length - 2].toLowerCase();
+    if (SAFE_LIKE_EXTS.has(secondToLast)) {
+      issues.push({ level: "warn", text: `El nombre del archivo usa doble extensión: ".${secondToLast}.${ext}" — técnica habitual para disfrazar ejecutables o scripts como documentos.` });
+      if (extStatus === "ok") {
+        extStatus = "warn";
+        extDetail  = `Doble extensión detectada: .${secondToLast}.${ext}`;
+      } else {
+        extDetail += ` · doble extensión: .${secondToLast}.${ext}`;
+      }
+    }
+  }
+
+  step("extmatch", extStatus, extDetail);
+
   // Paso 6: estructura interna
-  step("structure", "start");
   let structureDetail = "No aplica para este tipo de archivo";
   let zipInfo = null;
 
@@ -236,7 +254,6 @@ async function analyze(file) {
   step("structure", zipInfo?.truncated ? "warn" : "ok", structureDetail + (zipInfo?.truncated ? " (lista truncada por límite de seguridad)" : ""));
 
   // Paso 7: macros / scripts embebidos
-  step("macros", "start");
   let macroDetail = "Sin indicios de macros o scripts embebidos";
   let macroLevel = "ok";
 
@@ -278,7 +295,6 @@ async function analyze(file) {
   step("macros", macroLevel, macroDetail);
 
   // Paso 8: informe final
-  step("report", "start");
   let overall = "ok";
   if (issues.some(i => i.level === "danger")) overall = "danger";
   else if (issues.some(i => i.level === "warn")) overall = "warn";

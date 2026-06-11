@@ -444,6 +444,11 @@ async function dnsHasMX(domain) {
  * Verifica si el dominio tiene registro SPF en sus TXT.
  * SPF (Sender Policy Framework) indica qué servidores están autorizados
  * a enviar correo en nombre del dominio.
+ * Devuelve:
+ *   true           → SPF válido
+ *   "permissive"   → SPF existe pero con +all (permite CUALQUIER emisor — inseguro)
+ *   false          → sin registro SPF
+ *   null           → error de consulta
  */
 async function dnsHasSPF(domain) {
   try {
@@ -452,28 +457,56 @@ async function dnsHasSPF(domain) {
       { headers: { Accept: "application/dns-json" } }
     );
     const d = await r.json();
-    return Array.isArray(d.Answer) && d.Answer.some(
+    if (!Array.isArray(d.Answer)) return null;
+    const spfRec = d.Answer.find(
       (rec) => typeof rec.data === "string" && rec.data.includes("v=spf1")
+    );
+    if (!spfRec) return false;
+    // "+all" significa que cualquier servidor puede enviar como este dominio → tan inseguro como no tener SPF
+    if (/\+all\b/.test(spfRec.data)) return "permissive";
+    return true;
+  } catch { return null; }
+}
+
+/**
+ * Consulta el registro DMARC de un FQDN dado.
+ * Devuelve true si existe, false si no hay registro, null si hubo error.
+ */
+async function _queryDmarcTxt(fqdn) {
+  try {
+    const r = await fetch(
+      `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(fqdn)}&type=TXT`,
+      { headers: { Accept: "application/dns-json" } }
+    );
+    const d = await r.json();
+    if (!Array.isArray(d.Answer)) return null;
+    if (d.Answer.length === 0) return false;
+    return d.Answer.some(
+      (rec) => typeof rec.data === "string" && rec.data.includes("v=DMARC1")
     );
   } catch { return null; }
 }
 
 /**
- * Verifica si el dominio tiene política DMARC en _dmarc.<domain>.
- * DMARC instruye a los servidores receptores cómo tratar correos
- * que no superan las validaciones SPF/DKIM.
+ * Verifica si el dominio tiene política DMARC.
+ * Implementa el fallback al dominio organizacional según RFC 7489 §6.6.3:
+ * si subdomain.empresa.com no tiene _dmarc, busca en _dmarc.empresa.com.
+ * Esto evita falsos "Sin política DMARC" en dominios de envío como
+ * mail.spotify.com o notifications.paypal.com, que heredan la política
+ * del dominio raíz.
  */
 async function dnsHasDMARC(domain) {
-  try {
-    const r = await fetch(
-      `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent("_dmarc." + domain)}&type=TXT`,
-      { headers: { Accept: "application/dns-json" } }
-    );
-    const d = await r.json();
-    return Array.isArray(d.Answer) && d.Answer.some(
-      (rec) => typeof rec.data === "string" && rec.data.includes("v=DMARC1")
-    );
-  } catch { return null; }
+  // Intento 1: dominio exacto
+  const direct = await _queryDmarcTxt("_dmarc." + domain);
+  if (direct !== false) return direct; // true (encontrado) o null (error de red)
+
+  // Intento 2: dominio organizacional (e.g., mail.example.com → example.com)
+  const parts = domain.split(".");
+  if (parts.length > 2) {
+    const orgDomain = parts.slice(-2).join(".");
+    return _queryDmarcTxt("_dmarc." + orgDomain);
+  }
+  return false;
 }
 
 /**
@@ -604,6 +637,10 @@ async function analyzeSender(raw) {
   let spfText;
   if (spf === true) {
     spfText = "Registro SPF encontrado";
+  } else if (spf === "permissive") {
+    spfText = "SPF con +all ⚠ (inseguro)";
+    issues.push("El dominio tiene SPF pero usa \"+all\" — permite que cualquier servidor envíe correos como este dominio. Es tan inseguro como no tener SPF.");
+    score += 20;
   } else if (spf === false) {
     spfText = "Sin registro SPF ⚠";
     issues.push("El dominio no tiene registro SPF — cualquiera puede enviar correos suplantándolo.");
@@ -874,6 +911,8 @@ function fmtSizeUI(n) {
 function openFileModal() {
   document.getElementById("fileModalOverlay").hidden = false;
   document.body.style.overflow = "hidden";
+  // Accesibilidad: mover el foco al botón de cierre al abrir el diálogo
+  requestAnimationFrame(() => document.getElementById("fileModalClose").focus());
 }
 
 function closeFileModal() {
@@ -883,6 +922,8 @@ function closeFileModal() {
     activeFileWorker.terminate();
     activeFileWorker = null;
   }
+  // Accesibilidad: devolver el foco al botón que abrió el diálogo
+  document.getElementById("fileBtn").focus();
 }
 
 function renderChecklist() {
@@ -1033,6 +1074,39 @@ document.getElementById("fileInput").addEventListener("change", (e) => {
   document.getElementById("fileName").textContent = `${file.name} (${fmtSizeUI(file.size)})`;
   startFileAnalysis(file);
 });
+
+// ── Drag-and-drop ──────────────────────────────────────
+(function setupDragDrop() {
+  const dropZone = document.querySelector(".file-drop");
+  if (!dropZone) return;
+
+  function handleFile(file) {
+    if (!file) return;
+    document.getElementById("fileName").textContent = `${file.name} (${fmtSizeUI(file.size)})`;
+    startFileAnalysis(file);
+  }
+
+  dropZone.addEventListener("dragenter", (e) => {
+    e.preventDefault();
+    dropZone.classList.add("drag-active");
+  });
+  dropZone.addEventListener("dragover", (e) => {
+    e.preventDefault(); // necesario para que "drop" se dispare
+    dropZone.classList.add("drag-active");
+  });
+  dropZone.addEventListener("dragleave", (e) => {
+    // Solo quitar la clase si el cursor sale del dropZone (no de un hijo)
+    if (!dropZone.contains(e.relatedTarget)) {
+      dropZone.classList.remove("drag-active");
+    }
+  });
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropZone.classList.remove("drag-active");
+    const file = e.dataTransfer.files?.[0];
+    handleFile(file);
+  });
+})();
 
 document.getElementById("fileModalClose").addEventListener("click", closeFileModal);
 document.getElementById("fileModalOverlay").addEventListener("click", (e) => {
