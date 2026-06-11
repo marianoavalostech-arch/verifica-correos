@@ -2,10 +2,13 @@
  * Verifica Correos — Función serverless para Netlify
  *
  * Fuentes de verificación (consultadas en paralelo):
- *   1. URLhaus / abuse.ch        — libre, sin clave de API
- *   2. ThreatFox / abuse.ch      — libre, sin clave de API
+ *   1. URLhaus / abuse.ch        — requiere ABUSECH_AUTH_KEY (gratuita, auth.abuse.ch)
+ *   2. ThreatFox / abuse.ch      — requiere ABUSECH_AUTH_KEY (misma clave)
  *   3. Google Safe Browsing v4   — requiere GOOGLE_SAFE_BROWSING_KEY
  *   4. VirusTotal v3             — requiere VIRUSTOTAL_API_KEY (opcional)
+ *
+ * Nota: desde 2025 abuse.ch exige autenticación con Auth-Key en sus APIs.
+ * Sin la clave, las consultas a URLhaus/ThreatFox se omiten.
  *
  * Recibe { url } o { urls: [...] }
  * Devuelve { verdict, results, source, note }
@@ -38,6 +41,70 @@ const CORS_HEADERS = {
 // Solo se aceptan URLs con protocolo http(s) y longitud razonable.
 const VALID_URL_RE = /^https?:\/\/.{3,2000}$/;
 
+// --- Protección SSRF -------------------------------------------------------
+// followRedirects() hace fetch desde el servidor a URLs controladas por el
+// usuario. Sin este filtro, una URL como http://169.254.169.254/ o
+// http://localhost:8080/ haría que la función consulte servicios internos.
+
+const dns = require("node:dns").promises;
+
+function isPrivateIp(ip) {
+  // IPv4
+  const m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (m) {
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    return (
+      a === 0 || a === 10 || a === 127 ||
+      (a === 100 && b >= 64 && b <= 127) ||   // CGNAT 100.64/10
+      (a === 169 && b === 254) ||             // link-local / metadata
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      a >= 224                                 // multicast / reservado
+    );
+  }
+  // IPv6 (forma normalizada de Node)
+  const v6 = ip.toLowerCase();
+  return (
+    v6 === "::1" || v6 === "::" ||
+    v6.startsWith("fe80") ||                  // link-local
+    v6.startsWith("fc") || v6.startsWith("fd") || // ULA fc00::/7
+    v6.startsWith("::ffff:127.") || v6.startsWith("::ffff:10.") ||
+    v6.startsWith("::ffff:192.168.") || v6.startsWith("::ffff:169.254.")
+  );
+}
+
+/**
+ * true si la URL apunta a un host público al que es seguro hacer fetch.
+ * Rechaza hostnames internos, IPs literales privadas y nombres que
+ * resuelven a IPs privadas.
+ */
+async function isSafePublicUrl(url) {
+  let host;
+  try {
+    host = new URL(url).hostname.replace(/^\[|\]$/g, "");
+  } catch { return false; }
+
+  const lower = host.toLowerCase();
+  if (
+    lower === "localhost" ||
+    lower.endsWith(".localhost") ||
+    lower.endsWith(".local") ||
+    lower.endsWith(".internal") ||
+    !lower.includes(".") && !lower.includes(":")  // nombres sin punto (hosts internos)
+  ) return false;
+
+  if (isPrivateIp(lower)) return false;          // IP literal
+
+  // Resolver el hostname y verificar todas las IPs devueltas
+  try {
+    const addrs = await dns.lookup(lower, { all: true, verbatim: true });
+    if (addrs.length === 0) return false;
+    return addrs.every((a) => !isPrivateIp(a.address));
+  } catch {
+    return false; // no resuelve → no se hace fetch
+  }
+}
+
 // Límite de URLs por llamada y tamaño máximo del body (bytes).
 const MAX_URLS           = 100;
 const MAX_BODY_SIZE      = 50_000;
@@ -57,7 +124,7 @@ async function queryGSB(urls, apiKey) {
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       signal: ctrl.signal,
       body: JSON.stringify({
-        client: { clientId: "verifica-correos", clientVersion: "1.3.0" },
+        client: { clientId: "verifica-correos", clientVersion: "1.4.0" },
         threatInfo: {
           threatTypes:      GSB_THREAT_TYPES,
           platformTypes:    ["ANY_PLATFORM"],
@@ -84,13 +151,17 @@ async function queryGSB(urls, apiKey) {
  * URLhaus (abuse.ch) — base de datos abierta de URLs maliciosas.
  * Verificar query_status === "is_listed" para evitar falsos positivos.
  */
-async function queryUrlhaus(url) {
+async function queryUrlhaus(url, authKey) {
+  if (!authKey) return [];
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), 8000);
   try {
     const resp = await fetch(URLHAUS_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Auth-Key":     authKey,
+      },
       body:    new URLSearchParams({ url }),
       signal:  ctrl.signal,
     });
@@ -120,7 +191,8 @@ async function queryUrlhaus(url) {
  * Consulta por hostname extraído de la URL, sin clave de API.
  * Cubre infraestructura de C2, distribución de malware y phishing.
  */
-async function queryThreatFox(url) {
+async function queryThreatFox(url, authKey) {
+  if (!authKey) return [];
   let hostname;
   try {
     hostname = new URL(url).hostname;
@@ -133,7 +205,7 @@ async function queryThreatFox(url) {
   try {
     const resp = await fetch(THREATFOX_URL, {
       method:  "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Auth-Key": authKey },
       body:    JSON.stringify({ query: "search_ioc", search_term: hostname }),
       signal:  ctrl.signal,
     });
@@ -201,6 +273,9 @@ async function followRedirects(startUrl, maxHops = 3) {
   const chain   = [startUrl];
   let current   = startUrl;
 
+  // SEGURIDAD: nunca hacer fetch a hosts internos o IPs privadas (SSRF).
+  if (!(await isSafePublicUrl(startUrl))) return chain;
+
   for (let i = 0; i < maxHops; i++) {
     let location = null;
 
@@ -238,7 +313,10 @@ async function followRedirects(startUrl, maxHops = 3) {
     try { next = new URL(location, current).href; } catch { break; }
     if (chain.includes(next)) break;     // evitar ciclos
     if (!VALID_URL_RE.test(next)) break; // solo http/https
+    // SEGURIDAD: el salto se registra en la cadena (para mostrarlo y verificarlo
+    // contra las APIs), pero si apunta a un host privado no se sigue (SSRF).
     chain.push(next);
+    if (!(await isSafePublicUrl(next))) break;
     current = next;
   }
   return chain;
@@ -304,12 +382,14 @@ exports.handler = async function (event) {
   // Por defecto true para mantener compatibilidad con llamadas sin el campo.
   const useVT = body.useVT !== false;
 
-  const GSB_KEY = process.env.GOOGLE_SAFE_BROWSING_KEY || "";
-  const VT_KEY  = (useVT && process.env.VIRUSTOTAL_API_KEY) || "";
+  const GSB_KEY     = process.env.GOOGLE_SAFE_BROWSING_KEY || "";
+  const ABUSECH_KEY = process.env.ABUSECH_AUTH_KEY || "";
+  const VT_KEY      = (useVT && process.env.VIRUSTOTAL_API_KEY) || "";
 
-  const activeSources = ["URLhaus", "ThreatFox"];
-  if (GSB_KEY) activeSources.unshift("Google Safe Browsing");
-  if (VT_KEY)  activeSources.push("VirusTotal");
+  const activeSources = [];
+  if (GSB_KEY)     activeSources.push("Google Safe Browsing");
+  if (ABUSECH_KEY) activeSources.push("URLhaus", "ThreatFox");
+  if (VT_KEY)      activeSources.push("VirusTotal");
 
   // Seguir redirects HTTP para detectar cadenas multi-salto
   // (ej: redirector corporativo → landing → página de phishing real).
@@ -330,8 +410,8 @@ exports.handler = async function (event) {
     GSB_KEY
       ? queryGSB(allCheckUrls, GSB_KEY)
       : Promise.resolve([]),
-    Promise.all(allCheckUrls.map((u) => queryUrlhaus(u))),
-    Promise.all(allCheckUrls.map((u) => queryThreatFox(u))),
+    Promise.all(allCheckUrls.map((u) => queryUrlhaus(u, ABUSECH_KEY))),
+    Promise.all(allCheckUrls.map((u) => queryThreatFox(u, ABUSECH_KEY))),
     Promise.all(allCheckUrls.map((u) => queryVirusTotal(u, VT_KEY))),
   ]);
 
@@ -364,7 +444,9 @@ exports.handler = async function (event) {
   });
 
   const anyDangerous = results.some((r) => r.verdict === "dangerous");
-  const sourceStr    = activeSources.join(" + ");
+  const sourceStr    = activeSources.length
+    ? activeSources.join(" + ")
+    : "ninguna (sin claves de API configuradas)";
 
   let note =
     "Resultado orientativo. Fuentes consultadas: " + sourceStr + ". " +
@@ -374,8 +456,8 @@ exports.handler = async function (event) {
   if (truncated) {
     note += " Solo se verificaron las primeras " + MAX_URLS + " de " + urls.length + " URLs.";
   }
-  if (!GSB_KEY && !VT_KEY) {
-    note += " Para mayor cobertura, configura GOOGLE_SAFE_BROWSING_KEY y/o VIRUSTOTAL_API_KEY.";
+  if (!GSB_KEY || !ABUSECH_KEY) {
+    note += " Para mayor cobertura, configura GOOGLE_SAFE_BROWSING_KEY y ABUSECH_AUTH_KEY (ambas gratuitas).";
   }
 
   return respond({

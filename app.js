@@ -7,7 +7,7 @@ const CHECK_ENDPOINT = "/check";
 const STD_NOTE =
   "Resultado orientativo. Ninguna herramienta detecta el 100 % de las amenazas. " +
   "Un correo puede ser peligroso aunque aparezca como limpio. " +
-  "Fuentes del servidor: Google Safe Browsing, URLhaus, ThreatFox (abuse.ch), VirusTotal (opcional). " +
+  "Fuentes del servidor (según claves configuradas): Google Safe Browsing, URLhaus y ThreatFox (abuse.ch), VirusTotal. " +
   "Se analizan cadenas de redirects HTTP de hasta 3 saltos. " +
   "Fuentes del navegador: Cloudflare DNS (MX/SPF/DMARC), RDAP (antigüedad), análisis heurístico propio.";
 
@@ -660,8 +660,9 @@ function analyzeSubject(text) {
     score += 20;
   }
 
-  // Palabras en mayúsculas (3+ letras, solo letras en mayúsculas — excluye números y símbolos)
-  const words = text.split(/\s+/);
+  // Palabras en mayúsculas (3+ letras). Se elimina la puntuación adyacente
+  // para que "URGENTE:" o "¡ATENCIÓN!" también cuenten.
+  const words = text.split(/\s+/).map(w => w.replace(/[^A-Za-zÁÉÍÓÚÑÜáéíóúñü]/g, ""));
   const capsWords = words.filter(w =>
     w.length >= 3 && /^[A-ZÁÉÍÓÚÑÜ]+$/.test(w)
   );

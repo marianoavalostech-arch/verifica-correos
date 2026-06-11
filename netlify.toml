@@ -4,7 +4,9 @@
 #   1. Sube este repositorio a GitHub.
 #   2. En Netlify → "Import from Git" → selecciona el repo.
 #   3. En Site settings → Environment variables, añade:
-#      GOOGLE_SAFE_BROWSING_KEY = <tu clave>          (obligatoria)
+#      GOOGLE_SAFE_BROWSING_KEY = <tu clave>          (recomendada)
+#      ABUSECH_AUTH_KEY         = <tu clave>          (recomendada — gratuita en auth.abuse.ch;
+#                                                      sin ella URLhaus y ThreatFox no responden)
 #      VIRUSTOTAL_API_KEY       = <tu clave>          (opcional — amplía cobertura)
 #      ALLOWED_ORIGIN           = https://tu-sitio.netlify.app  (OBLIGATORIA en producción)
 #   4. Haz redeploy.
@@ -34,4 +36,10 @@
     X-Content-Type-Options     = "nosniff"
     Referrer-Policy            = "no-referrer"
     Permissions-Policy         = "geolocation=(), microphone=(), camera=()"
-    Content-Security-Policy    = "default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://cloudflare-dns.com https://rdap.org; img-src 'self' data:; frame-ancestors 'none'"
+    # Notas CSP:
+    # - style-src necesita 'unsafe-inline': la UI de resultados se genera con
+    #   atributos style inline (sin él, los resultados se renderizan sin estilos).
+    # - connect-src usa https: porque rdap.org responde con un redirect 302 al
+    #   servidor RDAP del registro correspondiente (rdap.verisign.com, etc.),
+    #   imposible de enumerar de antemano; la CSP valida cada salto del redirect.
+    Content-Security-Policy    = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https:; img-src 'self' data:; frame-ancestors 'none'"
