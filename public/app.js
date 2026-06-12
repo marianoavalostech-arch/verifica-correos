@@ -220,6 +220,9 @@ const BODY_RULES = [
   },
 ];
 
+// Último análisis realizado (usado para generar informes)
+let lastAnalysisData = null;
+
 // Correo de phishing de ejemplo para demostración
 const PHISHING_EXAMPLE = {
   sender:  "soporte@banco-seguro.tk",
@@ -1320,6 +1323,19 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, url
 
   const riskColor = riskScore >= 60 ? "var(--danger)" : riskScore >= 20 ? "var(--warn)" : "var(--accent)";
 
+  // Guardar datos del análisis para generación de informes
+  lastAnalysisData = {
+    globalState, riskScore, urlState,
+    senderResult, subjectResult, bodyResult,
+    urlResult, urlError, allUrls,
+    shorteners: shorteners || [],
+    trackerInfo: trackerInfo || new Map(),
+    realUrlToTracker: realUrlToTracker || new Map(),
+    spoofedUrls: spoofedUrls || new Map(),
+    redirectInfo: redirectInfo || new Map(),
+    evasionTechniques: evasionTechniques || [],
+  };
+
   const globalHeadlines = {
     danger: "⚠ Se detectaron señales de peligro",
     warn:   "⚡ Hay señales de alerta",
@@ -1360,6 +1376,21 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, url
   note.className = "note";
   note.textContent = urlResult?.note || STD_NOTE;
   container.appendChild(note);
+
+  // Botones de informe
+  const reportActions = document.createElement("div");
+  reportActions.className = "report-actions";
+  reportActions.innerHTML = `
+    <button class="btn-report-html" id="viewReportBtn" type="button">
+      📄 Ver informe completo
+    </button>
+    <button class="btn-report-txt" id="downloadReportBtn" type="button">
+      ⬇ Descargar .txt
+    </button>
+  `;
+  container.appendChild(reportActions);
+  document.getElementById("viewReportBtn").addEventListener("click", openHtmlReport);
+  document.getElementById("downloadReportBtn").addEventListener("click", downloadTextReport);
 }
 
 function buildSubjectSection(s) {
@@ -1435,6 +1466,288 @@ function buildBodySection(b) {
   return section;
 }
 
+// ═══════════════════════════════════════════════════════
+//  Generación de informes
+// ═══════════════════════════════════════════════════════
+
+function buildTextReport(d) {
+  const ts = new Date().toLocaleString("es-AR", {
+    day:"2-digit", month:"2-digit", year:"numeric",
+    hour:"2-digit", minute:"2-digit"
+  });
+  const globalLabels = {
+    danger: "PELIGROSO — Se detectaron señales de peligro",
+    warn:   "ALERTA — Hay señales que requieren atención",
+    safe:   "LIMPIO — Sin amenazas detectadas",
+  };
+  let txt =
+`VERIFICA CORREOS — INFORME DE ANÁLISIS
+${"═".repeat(58)}
+Fecha: ${ts}
+Herramienta: https://verifica-correos.netlify.app/
+
+VEREDICTO GLOBAL: ${globalLabels[d.globalState] || d.globalState.toUpperCase()}
+Riesgo estimado: ${d.riskScore} / 100
+
+`;
+
+  if (d.senderResult) {
+    const s = d.senderResult;
+    const sl = { danger:"PELIGROSO", warn:"ALERTA", safe:"LIMPIO" }[s.state] || s.state.toUpperCase();
+    txt += `${"─".repeat(58)}\nREMITENTE\nDirección: ${s.email}\nEstado: ${sl}\n\n`;
+    if (s.stats) s.stats.forEach(([l, v]) => { txt += `  ${(l + ":").padEnd(16)} ${v}\n`; });
+    if (s.issues.length) {
+      txt += "\nProblemas detectados:\n";
+      s.issues.forEach(i => { txt += `  • ${i}\n`; });
+    }
+    txt += "\n";
+  }
+
+  if (d.subjectResult && d.subjectResult.issues.length > 0) {
+    const s = d.subjectResult;
+    const sl = { danger:"ALERTA", warn:"AVISO", safe:"LIMPIO" }[s.state] || s.state.toUpperCase();
+    txt += `${"─".repeat(58)}\nASUNTO\nEstado: ${sl}\n\nProblemas detectados:\n`;
+    s.issues.forEach(i => { txt += `  • ${i}\n`; });
+    txt += "\n";
+  }
+
+  if (d.bodyResult) {
+    const b = d.bodyResult;
+    const bl = { danger:"SOSPECHOSO", warn:"ALERTA", safe:"LIMPIO" }[b.state] || b.state.toUpperCase();
+    txt += `${"─".repeat(58)}\nCUERPO DEL CORREO\nEstado: ${bl}\n`;
+    if (b.issues.length) {
+      txt += "\nSeñales detectadas:\n";
+      b.issues.forEach(i => { txt += `  • [${i.label}]\n    ${i.desc}\n`; });
+    } else {
+      txt += "  ✓ No se detectaron patrones sospechosos.\n";
+    }
+    txt += "\n";
+  }
+
+  if (d.allUrls && d.allUrls.length > 0) {
+    const resultMap = new Map((d.urlResult?.results ?? []).map(r => [r.url, r]));
+    txt += `${"─".repeat(58)}\nURLs ANALIZADAS (${d.allUrls.length})\n\n`;
+    d.allUrls.forEach(url => {
+      const r          = resultMap.get(url);
+      const isShortener = d.shorteners?.includes(url);
+      const tracker    = d.trackerInfo?.get(url);
+      const spoofing   = d.spoofedUrls?.get(url);
+      const redirectReal = d.redirectInfo?.get(url);
+      let verdictText;
+      if (spoofing) {
+        verdictText = `[FALSIFICADA] Destino real: "${spoofing.realHost}" — no "${spoofing.fakeHost}"`;
+      } else if (r?.verdict === "dangerous") {
+        const threats = (r.threats || []).map(t => THREAT_LABELS[t] || t).join(", ");
+        verdictText = "[AMENAZA] " + (threats || "Detectada por sistemas antimalware");
+      } else if (tracker) {
+        verdictText = `[TRACKING] ${tracker.name}${tracker.realUrl ? `\n    Destino real: ${tracker.realUrl}` : " (destino no decodificable)"}`;
+      } else if (redirectReal) {
+        verdictText = `[REDIRECT] Destino: ${redirectReal}`;
+      } else if (isShortener) {
+        verdictText = "[ACORTADOR] Destino real oculto";
+      } else if (r?.verdict === "safe") {
+        verdictText = "[LIMPIA] Sin amenazas conocidas";
+      } else {
+        verdictText = "[SIN VERIFICAR]";
+      }
+      txt += `  ${url}\n  → ${verdictText}\n\n`;
+    });
+  }
+
+  txt += `${"═".repeat(58)}\nNOTA IMPORTANTE:\n${STD_NOTE}\n\nVerifica Correos — herramienta gratuita y open source\nhttps://verifica-correos.netlify.app/\n`;
+  return txt;
+}
+
+function _buildHtmlSection(title, badge, color, bodyHtml) {
+  return `
+  <div style="margin-bottom:16px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;
+                padding:11px 16px;background:#f9fafb;border-bottom:1px solid #e5e7eb">
+      <span style="font-weight:600;font-size:14px">${esc(title)}</span>
+      <span style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:4px;
+                   letter-spacing:.5px;background:${color}22;color:${color}">${esc(badge)}</span>
+    </div>
+    <div style="padding:14px 16px">${bodyHtml}</div>
+  </div>`;
+}
+
+function buildHtmlReport(d) {
+  const ts = new Date().toLocaleString("es-AR", {
+    day:"2-digit", month:"2-digit", year:"numeric",
+    hour:"2-digit", minute:"2-digit"
+  });
+  const globalLabel = { danger:"⚠ PELIGROSO", warn:"⚡ ALERTA", safe:"✓ LIMPIO" }[d.globalState] || "—";
+  const globalColor  = { danger:"#dc2626", warn:"#d97706", safe:"#059669" }[d.globalState] || "#6b7280";
+  const globalBg     = { danger:"#fef2f2", warn:"#fffbeb", safe:"#f0fdf4" }[d.globalState] || "#f9fafb";
+  const globalBorder = { danger:"#fca5a5", warn:"#fcd34d", safe:"#86efac" }[d.globalState] || "#e5e7eb";
+  const riskColor    = d.riskScore >= 60 ? "#dc2626" : d.riskScore >= 20 ? "#d97706" : "#059669";
+
+  let sectionsHtml = "";
+
+  // Remitente
+  if (d.senderResult) {
+    const s = d.senderResult;
+    const sc = { danger:"#dc2626", warn:"#d97706", safe:"#059669" }[s.state] || "#6b7280";
+    const sl = { danger:"PELIGROSO", warn:"ALERTA", safe:"LIMPIO" }[s.state] || s.state.toUpperCase();
+    let bHtml = `<p style="font-family:monospace;font-size:13px;margin-bottom:12px;color:#1f2937;word-break:break-all">${esc(s.email)}</p>`;
+    if (s.stats) {
+      bHtml += `<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:12px">` +
+        s.stats.map(([l, v]) => `
+          <div style="background:#f3f4f6;border-radius:6px;padding:8px 10px">
+            <div style="font-size:10px;color:#9ca3af;text-transform:uppercase;margin-bottom:2px">${esc(l)}</div>
+            <div style="font-size:12px;font-family:monospace;color:#111">${esc(v)}</div>
+          </div>`).join("") + `</div>`;
+    }
+    if (s.issues.length) {
+      bHtml += `<ul style="list-style:none;padding:0">` +
+        s.issues.map(i => `<li style="padding:5px 0;border-bottom:1px solid #f3f4f6;font-size:13px;line-height:1.45">
+          <span style="color:${sc}">▸ </span>${esc(i)}</li>`).join("") + `</ul>`;
+    } else {
+      bHtml += `<p style="font-size:13px;color:#059669">✓ Sin señales de alerta en el remitente.</p>`;
+    }
+    sectionsHtml += _buildHtmlSection("✉ Remitente", sl, sc, bHtml);
+  }
+
+  // Asunto
+  if (d.subjectResult && d.subjectResult.issues.length > 0) {
+    const s = d.subjectResult;
+    const sc = { danger:"#dc2626", warn:"#d97706", safe:"#059669" }[s.state] || "#6b7280";
+    const sl = { danger:"ALERTA", warn:"AVISO", safe:"LIMPIO" }[s.state] || s.state.toUpperCase();
+    const bHtml = `<ul style="list-style:none;padding:0">` +
+      s.issues.map(i => `<li style="padding:5px 0;border-bottom:1px solid #f3f4f6;font-size:13px;line-height:1.45">
+        <span style="color:${sc}">▸ </span>${esc(i)}</li>`).join("") + `</ul>`;
+    sectionsHtml += _buildHtmlSection("📌 Asunto", sl, sc, bHtml);
+  }
+
+  // Cuerpo
+  if (d.bodyResult) {
+    const b = d.bodyResult;
+    const bc = { danger:"#dc2626", warn:"#d97706", safe:"#059669" }[b.state] || "#6b7280";
+    const bl = { danger:"SOSPECHOSO", warn:"ALERTA", safe:"LIMPIO" }[b.state] || b.state.toUpperCase();
+    let bHtml;
+    if (!b.issues.length) {
+      bHtml = `<p style="color:#059669;font-size:13px">✓ No se detectaron patrones sospechosos.</p>`;
+    } else {
+      bHtml = b.issues.map(item => `
+        <div style="padding:8px 0;border-bottom:1px solid #f3f4f6">
+          <div style="font-size:11px;font-weight:700;color:#374151;text-transform:uppercase;
+                      letter-spacing:.5px;margin-bottom:3px">${esc(item.label)}</div>
+          <div style="font-size:13px;color:#6b7280;line-height:1.5">${esc(item.desc)}</div>
+        </div>`).join("");
+    }
+    sectionsHtml += _buildHtmlSection("📄 Cuerpo del correo", bl, bc, bHtml);
+  }
+
+  // URLs
+  if (d.allUrls && d.allUrls.length > 0) {
+    const resultMap = new Map((d.urlResult?.results ?? []).map(r => [r.url, r]));
+    const urlItemsHtml = d.allUrls.map(url => {
+      const r           = resultMap.get(url);
+      const isShortener  = d.shorteners?.includes(url);
+      const tracker     = d.trackerInfo?.get(url);
+      const spoofing    = d.spoofedUrls?.get(url);
+      const redirectReal = d.redirectInfo?.get(url);
+      let cls, verdictText, extra = "";
+      if (spoofing) {
+        cls = "url-danger";
+        verdictText = `⚠ URL FALSIFICADA — destino real: "${spoofing.realHost}"`;
+      } else if (r?.verdict === "dangerous") {
+        const threats = (r.threats || []).map(t => THREAT_LABELS[t] || t).join(", ");
+        cls = "url-danger"; verdictText = "⚠ AMENAZA: " + (threats || "detectada");
+      } else if (tracker) {
+        cls = "url-warn"; verdictText = `⚡ Tracking (${tracker.name})`;
+        if (tracker.realUrl) extra = `<div style="font-size:11px;font-family:monospace;color:#6b7280;margin-top:4px;word-break:break-all">→ ${esc(tracker.realUrl)}</div>`;
+      } else if (redirectReal) {
+        cls = "url-warn"; verdictText = "⚡ Redirect a otro dominio";
+        extra = `<div style="font-size:11px;font-family:monospace;color:#6b7280;margin-top:4px;word-break:break-all">→ ${esc(redirectReal)}</div>`;
+      } else if (isShortener) {
+        cls = "url-warn"; verdictText = "⚡ Acortador de URL";
+      } else if (r?.verdict === "safe") {
+        cls = "url-safe"; verdictText = "✓ Sin amenazas";
+      } else {
+        cls = "url-unknown"; verdictText = "? Sin verificar";
+      }
+      const colors = {
+        "url-danger":  { border:"#fca5a5", bg:"#fef2f2", vc:"#dc2626" },
+        "url-warn":    { border:"#fcd34d", bg:"#fffbeb", vc:"#d97706" },
+        "url-safe":    { border:"#86efac", bg:"#f0fdf4", vc:"#059669" },
+        "url-unknown": { border:"#e5e7eb", bg:"#f9fafb", vc:"#9ca3af" },
+      }[cls] || { border:"#e5e7eb", bg:"#f9fafb", vc:"#6b7280" };
+      return `<div style="padding:9px 12px;border-radius:7px;margin-bottom:8px;
+                           border:1px solid ${colors.border};background:${colors.bg}">
+        <div style="font-family:monospace;font-size:11px;word-break:break-all;color:#374151">${esc(url)}</div>
+        <div style="font-size:12px;font-weight:700;color:${colors.vc};margin-top:4px">${esc(verdictText)}</div>
+        ${extra}
+      </div>`;
+    }).join("");
+
+    const urlLabel = d.urlState === "danger" ? "PELIGROSAS" : d.urlState === "warn" ? "AVISO" : "LIMPIAS";
+    const urlColor = { danger:"#dc2626", warn:"#d97706", safe:"#059669" }[d.urlState] || "#6b7280";
+    sectionsHtml += _buildHtmlSection(`🔗 URLs (${d.allUrls.length})`, urlLabel, urlColor, urlItemsHtml);
+  }
+
+  // Construir el HTML del informe con concatenación de strings para evitar problemas con backticks
+  const b = [];
+  b.push('<!DOCTYPE html><html lang="es"><head>');
+  b.push('<meta charset="UTF-8">');
+  b.push('<meta name="viewport" content="width=device-width, initial-scale=1.0">');
+  b.push('<title>Informe — Verifica Correos</title>');
+  b.push('<style>');
+  b.push('*{margin:0;padding:0;box-sizing:border-box}');
+  b.push('body{font-family:"Segoe UI",Arial,sans-serif;background:#f3f4f6;color:#111;padding:32px 16px}');
+  b.push('.report{max-width:660px;margin:0 auto;background:#fff;border-radius:12px;padding:36px 36px 28px;box-shadow:0 4px 24px rgba(0,0,0,.10)}');
+  b.push('.report-tag{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#6b7280;margin-bottom:8px}');
+  b.push('.report-title{font-size:22px;font-weight:700;color:#111;margin-bottom:4px}');
+  b.push('.report-meta{font-size:12px;color:#9ca3af;margin-bottom:24px}');
+  b.push('.report-meta a{color:#9ca3af}');
+  b.push('.print-btn{display:inline-flex;align-items:center;gap:6px;background:#16a34a;color:#fff;border:none;border-radius:8px;padding:10px 18px;font-size:13px;font-weight:600;cursor:pointer;margin-bottom:24px}');
+  b.push('.print-btn:hover{background:#15803d}');
+  b.push('.note-txt{font-size:11px;color:#9ca3af;border-top:1px solid #e5e7eb;padding-top:16px;margin-top:8px;line-height:1.65}');
+  b.push('.rpt-footer{text-align:center;font-size:11px;color:#d1d5db;margin-top:20px}');
+  b.push('@media print{.print-btn{display:none}body{background:#fff;padding:0}.report{box-shadow:none;border-radius:0}}');
+  b.push('</style></head><body><div class="report">');
+  b.push('<div class="report-tag">// verifica correos &middot; informe de análisis</div>');
+  b.push('<div class="report-title">&#128737; Informe de Seguridad</div>');
+  b.push('<div class="report-meta">Generado el ' + ts + ' &nbsp;&middot;&nbsp; <a href="https://verifica-correos.netlify.app/" target="_blank">verifica-correos.netlify.app</a></div>');
+  b.push('<button class="print-btn" onclick="window.print()">&#128424; Imprimir / Guardar como PDF</button>');
+  // Banner veredicto global
+  b.push('<div style="padding:18px 20px;border-radius:10px;margin-bottom:20px;background:' + globalBg + ';border:1.5px solid ' + globalBorder + '">');
+  b.push('<div style="font-size:20px;font-weight:700;color:' + globalColor + ';margin-bottom:10px">' + esc(globalLabel) + '</div>');
+  b.push('<div style="background:#e5e7eb;border-radius:4px;height:7px;margin-bottom:6px">');
+  b.push('<div style="height:7px;border-radius:4px;background:' + riskColor + ';width:' + d.riskScore + '%"></div></div>');
+  b.push('<div style="font-size:12px;color:#6b7280">Riesgo estimado: ' + d.riskScore + ' / 100</div></div>');
+  b.push(sectionsHtml);
+  b.push('<div class="note-txt">' + esc(STD_NOTE) + '</div>');
+  b.push('<div class="rpt-footer">Verifica Correos — herramienta gratuita &middot; resultado orientativo</div>');
+  b.push('</div></body></html>');
+  return b.join("\n");
+}
+
+function openHtmlReport() {
+  if (!lastAnalysisData) return;
+  const html = buildHtmlReport(lastAnalysisData);
+  const win = window.open("", "_blank");
+  if (!win) {
+    alert("Permití ventanas emergentes para ver el informe completo.");
+    return;
+  }
+  win.document.write(html);
+  win.document.close();
+}
+
+function downloadTextReport() {
+  if (!lastAnalysisData) return;
+  const txt = buildTextReport(lastAnalysisData);
+  const blob = new Blob([txt], { type: "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "informe-verifica-correos-" + new Date().toISOString().slice(0,10) + ".txt";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
 function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo, evasionTechniques = [], urlError = null) {
   // Mapa rápido: url → resultado del servidor
   const resultMap = new Map(
@@ -1448,25 +1761,20 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
     }
   }
 
-  // Solo mostramos las URLs originales del usuario (no las decodificadas como items separados)
-  // Las decodificadas aparecen inline dentro del item del tracker.
   const displayUrls = allUrls;
 
-  // Peligrosas: solo entre las URLs originales (excluir las decodificadas)
   const dangerCount = displayUrls.filter(u => {
     if (spoofedUrls?.has(u) || resultMap.get(u)?.verdict === "dangerous") return true;
     const rDest = redirectInfo?.get(u);
     return rDest && resultMap.get(rDest)?.verdict === "dangerous";
   }).length;
-  // También contar si alguna URL real (decodificada de tracker) es peligrosa
   const realUrlDangerCount = [...realUrlToTracker.keys()]
     .filter(u => resultMap.get(u)?.verdict === "dangerous").length;
   const totalDanger = dangerCount + realUrlDangerCount;
 
   const hasTrackers   = trackerInfo.size > 0;
   const hasShorteners = shorteners.length > 0;
-
-  const hasRedirects = redirectInfo && redirectInfo.size > 0;
+  const hasRedirects  = redirectInfo && redirectInfo.size > 0;
 
   const state = totalDanger > 0 ? "danger"
               : hasShorteners || hasTrackers || hasRedirects ? "warn"
@@ -1479,7 +1787,6 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
   const section = document.createElement("div");
   section.className = `result-section ${state}`;
 
-  // Bloque de técnicas de evasión detectadas
   const techScore = evasionTechniques.reduce((m, t) => Math.max(m, t.score), 0);
   const evasionHtml = evasionTechniques.length > 0 ? `
     <div style="margin-bottom:10px;padding:10px 12px;border-radius:6px;
@@ -1503,17 +1810,15 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
   const itemsHtml = displayUrls.map(url => {
     const r          = resultMap.get(url) ?? { url, verdict: "unknown", threats: [] };
     const isShortener = shorteners.includes(url);
-    const tracker    = trackerInfo?.get(url);   // { name, realUrl } | undefined
+    const tracker    = trackerInfo?.get(url);
     const realUrlResult = tracker?.realUrl ? resultMap.get(tracker.realUrl) : null;
-    const spoofing   = spoofedUrls?.get(url);   // { fakeHost, realHost } | undefined
-    // Redirect genérico: solo aplica si no es tracker conocido ni URL suplantada
+    const spoofing   = spoofedUrls?.get(url);
     const redirectRealUrl    = (!tracker && !spoofing) ? (redirectInfo?.get(url) ?? null) : null;
     const redirectRealResult = redirectRealUrl ? (resultMap.get(redirectRealUrl) ?? null) : null;
 
     let cls, verdictText;
 
     if (spoofing) {
-      // La suplantación via @ tiene prioridad — es siempre peligrosa
       cls = "url-danger";
       verdictText = `⚠ URL FALSIFICADA — aparenta ser "${spoofing.fakeHost}" pero el destino real es "${spoofing.realHost}"`;
     } else if (r.verdict === "dangerous") {
@@ -1521,11 +1826,9 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
       const threats = (r.threats || []).map(t => THREAT_LABELS[t] || t).join(", ");
       verdictText = "⚠ " + (threats || "AMENAZA DETECTADA");
     } else if (tracker) {
-      // Es un tracker de email — el estado depende también del destino real
       cls = realUrlResult?.verdict === "dangerous" ? "url-danger" : "url-warn";
       verdictText = `⚡ Tracking (${tracker.name}) — el destino real está enmascarado`;
     } else if (redirectRealUrl) {
-      // Redirect genérico: la URL contiene un parámetro ?url= con un destino oculto
       const isRealDangerous = redirectRealResult?.verdict === "dangerous";
       const hasDestChain    = (redirectRealResult?.redirectChain?.length ?? 0) > 0;
       const isObfuscated    = hasObfuscatedRedirectParam(redirectRealUrl);
@@ -1544,7 +1847,6 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
       cls = "url-safe";
       verdictText = "✓ Sin amenazas";
     } else if (r.verdict === "unverified") {
-      // El servidor excluyó esta URL de las APIs (host privado/interno).
       cls = "url-warn";
       verdictText = "⚠ No verificable — apunta a una dirección interna o privada";
     } else {
@@ -1552,7 +1854,6 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
       verdictText = "? Sin verificar";
     }
 
-    // Bloque inline del destino real decodificado (solo para trackers)
     let realUrlBlock = "";
     if (tracker) {
       if (tracker.realUrl) {
@@ -1590,16 +1891,9 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
       }
     }
 
-    // Bloque inline del destino decodificado para redirects genéricos.
-    // Incluye también la cadena de redirects HTTP posterior descubierta por el servidor
-    // (redirectRealResult.redirectChain), para que el destino final sea siempre visible
-    // aunque no figure todavía en ninguna base de datos de amenazas.
     let redirectBlock = "";
     if (redirectRealUrl) {
       const isObfuscatedDest = hasObfuscatedRedirectParam(redirectRealUrl);
-
-      // Reputación del dominio destino según las APIs (siempre se muestra,
-      // independientemente de si el parámetro ?src= está cifrado o no).
       let rColor, rText;
       if (redirectRealResult?.verdict === "dangerous") {
         const threats = (redirectRealResult.threats || []).map(t => THREAT_LABELS[t] || t).join(", ");
@@ -1612,22 +1906,14 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
         rColor = "var(--muted)";
         rText  = "? Sin verificar (servidor no disponible)";
       }
-
-      // Nota adicional cuando el parámetro destino está cifrado: el dominio
-      // fue verificado pero el destino FINAL dentro del ?src= sigue siendo desconocido.
       const obfuscatedNote = isObfuscatedDest
-        ? `<div style="margin-top:5px;font-family:var(--mono);font-size:10px;
-                       color:var(--warn)">
+        ? `<div style="margin-top:5px;font-family:var(--mono);font-size:10px;color:var(--warn)">
              ⚠ Parámetros cifrados — el destino final dentro del ?src= es desconocido
            </div>`
         : "";
-
-      // Saltos HTTP subsiguientes del destino decodificado
-      // Ej: videos.guidemesupport.com → mdayanahsan.online/amez/
       const destHops = redirectRealResult?.redirectChain ?? [];
       const hopChainHtml = destHops.length > 0
-        ? `<div style="margin-top:6px;font-family:var(--mono);font-size:10px;
-                       color:var(--muted);letter-spacing:.3px;text-transform:uppercase">
+        ? `<div style="margin-top:6px;font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:.3px;text-transform:uppercase">
              Saltos HTTP descubiertos por el servidor:
            </div>` +
           destHops.map(hopUrl => `
@@ -1636,7 +1922,6 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
               ↳ ${esc(hopUrl)}
             </div>`).join("")
         : "";
-
       redirectBlock = `
         <div style="margin-top:8px;padding:8px 10px;border-radius:6px;
                     border:1px solid var(--border);background:rgba(0,0,0,.25)">
@@ -1654,8 +1939,6 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
         </div>`;
     }
 
-    // Cadena de redirects HTTP descubiertos por el servidor (r.redirectChain).
-    // Visible cuando el servidor siguió saltos 302 y uno resultó peligroso.
     let serverChainBlock = "";
     const serverHops = r.redirectChain;
     if (serverHops?.length > 0) {

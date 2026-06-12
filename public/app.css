@@ -626,3 +626,50 @@
     .file-report-issues li.warn   { color: var(--warn);   border-color: rgba(255,200,87,.25); }
     .file-report-issues li.danger { color: var(--danger); border-color: rgba(255,92,108,.25); }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+
+    /* ── Botones de informe ── */
+    .report-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+    .btn-report-html,
+    .btn-report-txt {
+      flex: 1;
+      min-width: 140px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 11px 14px;
+      border-radius: 10px;
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .18s, transform .1s, color .18s;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .btn-report-html {
+      background: rgba(94, 230, 168, .12);
+      color: var(--accent);
+      border: 1px solid rgba(94, 230, 168, .3);
+    }
+    .btn-report-html:hover {
+      background: rgba(94, 230, 168, .22);
+      transform: translateY(-1px);
+    }
+    .btn-report-txt {
+      background: rgba(255, 255, 255, .04);
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    .btn-report-txt:hover {
+      background: rgba(255, 255, 255, .09);
+      color: var(--text);
+      border-color: var(--muted);
+      transform: translateY(-1px);
+    }
