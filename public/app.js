@@ -1030,9 +1030,78 @@ function updateChecklistStep(id, status, detail) {
   }
 }
 
+// Último informe de archivo analizado (para descarga)
+let lastFileReport = null;
+
+function buildFileTextReport(report) {
+  const { meta, issues = [], overall = "ok", aborted } = report;
+  const ts = new Date().toLocaleString("es-AR", {
+    day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
+  const verdictLabel = aborted
+    ? "ANÁLISIS INTERRUMPIDO"
+    : overall === "danger" ? "PELIGRO — se detectaron señales de riesgo importantes"
+    : overall === "warn"   ? "ADVERTENCIA — hay señales que requieren precaución"
+    : "Sin señales de riesgo evidentes en el análisis local";
+
+  let txt =
+`VERIFICA CORREOS — INFORME DE ARCHIVO ADJUNTO
+${"═".repeat(58)}
+Fecha: ${ts}
+Herramienta: https://verifica-correos.netlify.app/
+
+VEREDICTO: ${verdictLabel}
+
+`;
+
+  if (meta) {
+    txt += `${"─".repeat(58)}\nMETADATOS DEL ARCHIVO\n\n`;
+    if (meta.name)         txt += `  Nombre:                ${meta.name}\n`;
+    if (meta.size != null) txt += `  Tamaño:                ${fmtSizeUI(meta.size)}\n`;
+    if (meta.detectedType) txt += `  Tipo real detectado:   ${meta.detectedType}\n`;
+    if (meta.zipKind)      txt += `  Formato:               ${meta.zipKind}\n`;
+    if (meta.declaredType) txt += `  Tipo declarado:        ${meta.declaredType}\n`;
+    if (meta.sha256)       txt += `  SHA-256:               ${meta.sha256}\n`;
+    txt += "\n";
+  }
+
+  if (issues.length) {
+    txt += `${"─".repeat(58)}\nSEÑALES DETECTADAS\n\n`;
+    issues.forEach(i => {
+      const prefix = i.level === "danger" ? "⚠ PELIGRO" : "! AVISO";
+      txt += `  [${prefix}] ${i.text}\n\n`;
+    });
+  } else if (!aborted) {
+    txt += `${"─".repeat(58)}\nNo se encontraron extensiones engañosas, macros, ejecutables embebidos\nni contenido activo en el análisis local.\n\n`;
+  }
+
+  if (meta?.sha256 && meta.sha256 !== "(no disponible)") {
+    txt += `${"─".repeat(58)}\nVerificar hash en VirusTotal:\nhttps://www.virustotal.com/gui/file/${meta.sha256}\n\n`;
+  }
+
+  txt += `${"═".repeat(58)}\nNOTA: Resultado orientativo. El análisis se realizó 100% en el navegador,\nsin subir el archivo a ningún servidor.\n\nVerifica Correos — herramienta gratuita y open source\nhttps://verifica-correos.netlify.app/\n`;
+  return txt;
+}
+
+function downloadFileReport() {
+  if (!lastFileReport) return;
+  const txt  = buildFileTextReport(lastFileReport);
+  const name = lastFileReport.meta?.name ?? "archivo";
+  const blob = new Blob([txt], { type: "text/plain;charset=utf-8" });
+  const a    = document.createElement("a");
+  a.href     = URL.createObjectURL(blob);
+  a.download = `informe-archivo-${name}-${new Date().toISOString().slice(0, 10)}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
 function renderFileReport(report) {
   const el = document.getElementById("fileReport");
   if (!report) { el.innerHTML = ""; return; }
+  lastFileReport = report;
   const { meta, issues = [], overall = "ok", aborted } = report;
 
   const bannerText = aborted
@@ -1075,7 +1144,20 @@ function renderFileReport(report) {
     </div>`;
   }
 
+  if (!aborted) {
+    html += `<div style="margin-top:16px">
+      <button id="downloadFileReportBtn" class="btn-report-txt" type="button">
+        ⬇ Descargar informe .txt
+      </button>
+    </div>`;
+  }
+
   el.innerHTML = html;
+
+  if (!aborted) {
+    document.getElementById("downloadFileReportBtn")
+      ?.addEventListener("click", downloadFileReport);
+  }
 }
 
 function startFileAnalysis(file) {
