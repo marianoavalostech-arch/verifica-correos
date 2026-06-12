@@ -1700,16 +1700,13 @@ function buildHtmlReport(d) {
   b.push('.report-title{font-size:22px;font-weight:700;color:#111;margin-bottom:4px}');
   b.push('.report-meta{font-size:12px;color:#9ca3af;margin-bottom:24px}');
   b.push('.report-meta a{color:#9ca3af}');
-  b.push('.print-btn{display:inline-flex;align-items:center;gap:6px;background:#16a34a;color:#fff;border:none;border-radius:8px;padding:10px 18px;font-size:13px;font-weight:600;cursor:pointer;margin-bottom:24px}');
-  b.push('.print-btn:hover{background:#15803d}');
   b.push('.note-txt{font-size:11px;color:#9ca3af;border-top:1px solid #e5e7eb;padding-top:16px;margin-top:8px;line-height:1.65}');
   b.push('.rpt-footer{text-align:center;font-size:11px;color:#d1d5db;margin-top:20px}');
-  b.push('@media print{.print-btn{display:none}body{background:#fff;padding:0}.report{box-shadow:none;border-radius:0}}');
+  b.push('@media print{body{background:#fff;padding:0}.report{box-shadow:none;border-radius:0}}');
   b.push('</style></head><body><div class="report">');
   b.push('<div class="report-tag">// verifica correos &middot; informe de análisis</div>');
   b.push('<div class="report-title">&#128737; Informe de Seguridad</div>');
   b.push('<div class="report-meta">Generado el ' + ts + ' &nbsp;&middot;&nbsp; <a href="https://verifica-correos.netlify.app/" target="_blank">verifica-correos.netlify.app</a></div>');
-  b.push('<button class="print-btn" onclick="window.print()">&#128424; Imprimir / Guardar como PDF</button>');
   // Banner veredicto global
   b.push('<div style="padding:18px 20px;border-radius:10px;margin-bottom:20px;background:' + globalBg + ';border:1.5px solid ' + globalBorder + '">');
   b.push('<div style="font-size:20px;font-weight:700;color:' + globalColor + ';margin-bottom:10px">' + esc(globalLabel) + '</div>');
