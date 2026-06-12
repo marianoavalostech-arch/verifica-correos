@@ -24,7 +24,14 @@
 
 # Nota: la ruta /check y el rate limiting (20 req/min por IP) los define la
 # propia función en `export const config` (netlify/functions/check.mjs,
-# Functions v2). Ya no se necesita un [[redirects]] aquí.
+# Functions v2). Ya no se necesita un [[redirects]] para /check aquí.
+
+# ── Eliminar / al final de todas las rutas ───────────────────────────────────
+[[redirects]]
+  from   = "/*/"
+  to     = "/:splat"
+  status = 301
+  force  = false
 
 # ── Cabeceras de seguridad ────────────────────────────────────────────────────
 [[headers]]
