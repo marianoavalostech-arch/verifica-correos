@@ -339,15 +339,52 @@ async function analyze(file) {
       text += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunk, scanLen)));
     }
     const findings = [];
-    if (/\/JavaScript/.test(text) || /\/JS\b/.test(text)) findings.push("/JavaScript embebido");
-    if (/\/OpenAction/.test(text)) findings.push("/OpenAction (ejecución automática al abrir)");
-    if (/\/Launch/.test(text)) findings.push("/Launch (puede lanzar programas externos)");
+    const dangerFindings = new Set();
+
+    if (/\/JavaScript/.test(text) || /\/JS\b/.test(text)) {
+      findings.push("/JavaScript embebido");
+      dangerFindings.add("/JavaScript embebido");
+    }
+
+    // /OpenAction: clasificar según el tipo de acción referenciada.
+    // Evita falsos positivos cuando solo controla la vista inicial
+    // (p.ej. /XYZ o /Fit generados automáticamente por LibreOffice/Word).
+    let launchViaOpenAction = false;
+    const openActionIdx = text.indexOf('/OpenAction');
+    if (openActionIdx !== -1) {
+      const ctx = text.slice(openActionIdx, openActionIdx + 300);
+      if (/\/JavaScript|\/JS\b/.test(ctx)) {
+        findings.push("/OpenAction → /JavaScript (ejecuta código al abrir el PDF)");
+        dangerFindings.add("/OpenAction → /JavaScript (ejecuta código al abrir el PDF)");
+      } else if (/\/Launch/.test(ctx)) {
+        findings.push("/OpenAction → /Launch (lanza un programa al abrir el PDF)");
+        dangerFindings.add("/OpenAction → /Launch (lanza un programa al abrir el PDF)");
+        launchViaOpenAction = true;
+      } else if (/\/URI\b/.test(ctx)) {
+        findings.push("/OpenAction → /URI (abre una URL externa al abrir el PDF)");
+      } else if (/\/GoToR\b/.test(ctx)) {
+        findings.push("/OpenAction → /GoToR (abre otro archivo al abrir el PDF)");
+      } else if (/\/GoToE\b/.test(ctx)) {
+        findings.push("/OpenAction → /GoToE (abre PDF embebido al abrir)");
+      } else if (/\/SubmitForm\b/.test(ctx)) {
+        findings.push("/OpenAction → /SubmitForm (envía datos a un servidor al abrir)");
+      } else if (/\/ImportData\b/.test(ctx)) {
+        findings.push("/OpenAction → /ImportData (importa datos externos al abrir)");
+      }
+      // /XYZ, /Fit, /FitH, /FitV, /FitR, /FitB, /Named → solo controlan
+      // la vista inicial (página y zoom). Inofensivos, no se reportan.
+    }
+
+    if (!launchViaOpenAction && /\/Launch/.test(text)) {
+      findings.push("/Launch (puede lanzar programas externos)");
+      dangerFindings.add("/Launch (puede lanzar programas externos)");
+    }
     if (/\/EmbeddedFile/.test(text)) findings.push("/EmbeddedFile (archivos adjuntos ocultos)");
     if (/\/AA\b/.test(text)) findings.push("/AA (acciones automáticas)");
     if (/\/RichMedia/.test(text)) findings.push("/RichMedia (contenido Flash/multimedia embebido)");
 
     if (findings.length) {
-      const hasDangerous = findings.some(f => /OpenAction|Launch|JavaScript/.test(f));
+      const hasDangerous = dangerFindings.size > 0;
       issues.push({ level: hasDangerous ? "danger" : "warn", text: `El PDF contiene elementos activos: ${findings.join(", ")}.` });
       macroDetail = findings.join(", ");
       macroLevel = hasDangerous ? "danger" : "warn";
