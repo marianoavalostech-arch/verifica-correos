@@ -1121,6 +1121,11 @@ function startFileAnalysis(file) {
     } else if (msg.type === "result") {
       clearTimeout(timeout);
       renderFileReport(msg.report);
+      // Scroll automático al informe una vez generado
+      requestAnimationFrame(() => {
+        const report = document.getElementById("fileReport");
+        if (report) report.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
       worker.terminate();
       if (activeFileWorker === worker) activeFileWorker = null;
     }
