@@ -244,8 +244,44 @@ Banco Internacional de Seguridad`,
 // ═══════════════════════════════════════════════════════
 
 function esc(s) {
+  // Escapa también comillas: hardening por si algún valor termina
+  // interpolado en un contexto de atributo HTML.
   return String(s ?? "")
-    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+
+// Sufijos públicos compuestos más comunes (subconjunto de la Public Suffix
+// List). Sin esto, "mail.banco.com.ar" se trataba como si "com.ar" fuera el
+// dominio organizacional → DMARC mal consultado y subdominios mal contados.
+const MULTI_PART_TLDS = new Set([
+  // Argentina
+  "com.ar","gob.ar","gov.ar","org.ar","net.ar","edu.ar","mil.ar","tur.ar",
+  // Latinoamérica
+  "com.mx","gob.mx","org.mx","edu.mx","com.br","gov.br","org.br","net.br",
+  "edu.br","com.co","gov.co","edu.co","com.pe","gob.pe","edu.pe","com.cl",
+  "gob.cl","com.uy","gub.uy","edu.uy","com.py","gov.py","com.bo","gob.bo",
+  "com.ec","gob.ec","com.ve","gob.ve","com.do","gob.do","com.gt","gob.gt",
+  "com.pa","gob.pa","com.sv","gob.sv","com.ni","gob.ni","com.hn","gob.hn",
+  "com.cr","go.cr","com.cu","gob.cu",
+  // Resto del mundo (frecuentes)
+  "co.uk","org.uk","gov.uk","ac.uk","me.uk","com.es","org.es","gob.es",
+  "edu.es","nom.es","com.au","gov.au","net.au","org.au","co.nz","govt.nz",
+  "co.jp","or.jp","ne.jp","co.in","gov.in","net.in","org.in","com.cn",
+  "gov.cn","net.cn","org.cn","co.za","gov.za","com.tr","gov.tr",
+]);
+
+/**
+ * Cantidad de etiquetas que ocupa el sufijo público (1 para ".com",
+ * 2 para ".com.ar") y dominio organizacional resultante.
+ * Ej: "mail.banco.com.ar" → { suffixLen: 2, orgDomain: "banco.com.ar" }
+ */
+function getDomainInfo(domain) {
+  const parts = domain.split(".");
+  const lastTwo = parts.slice(-2).join(".");
+  const suffixLen = parts.length > 2 && MULTI_PART_TLDS.has(lastTwo) ? 2 : 1;
+  const orgLen = Math.min(parts.length, suffixLen + 1);
+  return { suffixLen, orgDomain: parts.slice(-orgLen).join(".") };
 }
 
 function levenshtein(a, b) {
@@ -418,15 +454,48 @@ function decodeTrackerRealUrl(url) {
 //  API
 // ═══════════════════════════════════════════════════════
 
+// El servidor rechaza bodies > 50 KB (413). Con muchas URLs largas el
+// payload puede superarlo, así que se recorta en el cliente con margen.
+const MAX_PAYLOAD_BYTES = 45_000;
+
+function capUrlsToPayload(urls, maxBytes = MAX_PAYLOAD_BYTES) {
+  const out = [];
+  let size = 40; // overhead aproximado del JSON envolvente
+  for (const u of urls) {
+    size += u.length + 4; // comillas + coma + escapes ocasionales
+    if (size > maxBytes) break;
+    out.push(u);
+  }
+  return out;
+}
+
+/**
+ * Llama a /check. Devuelve el JSON del servidor, o { error } si la
+ * respuesta es un error HTTP o un cuerpo de error — antes esos casos
+ * dejaban la UI en "AVISO" sin ninguna explicación.
+ */
 async function apiCheckUrls(urls, useVT = true) {
-  const payload = urls.length === 1 ? { url: urls[0] } : { urls };
+  const capped = capUrlsToPayload(urls);
+  const payload = capped.length === 1 ? { url: capped[0] } : { urls: capped };
   if (!useVT) payload.useVT = false;
-  const resp = await fetch(CHECK_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  return resp.json();
+  try {
+    const resp = await fetch(CHECK_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data || data.error) {
+      return { error: data?.error || `Error del servidor (HTTP ${resp.status})` };
+    }
+    if (capped.length < urls.length) {
+      data.note = (data.note || "") +
+        ` Por límite de tamaño solo se enviaron ${capped.length} de ${urls.length} URLs al servidor.`;
+    }
+    return data;
+  } catch {
+    return { error: "No se pudo contactar con el servidor de verificación." };
+  }
 }
 
 async function dnsHasMX(domain) {
@@ -500,10 +569,11 @@ async function dnsHasDMARC(domain) {
   const direct = await _queryDmarcTxt("_dmarc." + domain);
   if (direct !== false) return direct; // true (encontrado) o null (error de red)
 
-  // Intento 2: dominio organizacional (e.g., mail.example.com → example.com)
-  const parts = domain.split(".");
-  if (parts.length > 2) {
-    const orgDomain = parts.slice(-2).join(".");
+  // Intento 2: dominio organizacional, respetando sufijos compuestos.
+  // Antes: slice(-2) convertía "mail.banco.com.ar" en "com.ar" → consulta
+  // inútil y falso "Sin DMARC". Ahora: → "banco.com.ar".
+  const { orgDomain } = getDomainInfo(domain);
+  if (orgDomain !== domain) {
     return _queryDmarcTxt("_dmarc." + orgDomain);
   }
   return false;
@@ -579,8 +649,12 @@ async function analyzeSender(raw) {
     score += 60;
   }
 
-  if (parts.length > 3) {
-    issues.push(`${parts.length-1} niveles de subdominio (inusual en remitentes legítimos).`);
+  // Subdominios: descontar el sufijo público (".com" = 1 etiqueta,
+  // ".com.ar" = 2) y el dominio en sí. "mail.banco.com.ar" tiene 1 subdominio.
+  const { suffixLen } = getDomainInfo(domain);
+  const subLevels = Math.max(0, parts.length - suffixLen - 1);
+  if (subLevels >= 2) {
+    issues.push(`${subLevels} niveles de subdominio (inusual en remitentes legítimos).`);
     score += 20;
   }
 
@@ -853,15 +927,19 @@ document.getElementById("analyzeBtn").addEventListener("click", async () => {
       ...[...redirectInfo.values()].filter(u => !allUrls.includes(u)),
     ];
 
-    const [senderResult, urlResult] = await Promise.all([
+    const [senderResult, urlResponse] = await Promise.all([
       sender     ? analyzeSender(sender) : null,
-      urlsToCheck.length > 0 ? apiCheckUrls(urlsToCheck, useVT).catch(() => null) : null,
+      urlsToCheck.length > 0 ? apiCheckUrls(urlsToCheck, useVT) : null,
     ]);
+
+    // Separar respuesta válida de error del servidor (413, 403, 5xx, red…)
+    const urlError  = urlResponse?.error || null;
+    const urlResult = urlError ? null : urlResponse;
 
     const subjectResult = analyzeSubject(subject);
     const bodyResult    = analyzeBody(body);
 
-    renderResults({ senderResult, subjectResult, bodyResult, urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo });
+    renderResults({ senderResult, subjectResult, bodyResult, urlResult, urlError, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo });
 
     setTimeout(() => {
       document.getElementById("results").scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -1113,7 +1191,25 @@ document.getElementById("fileModalOverlay").addEventListener("click", (e) => {
   if (e.target.id === "fileModalOverlay") closeFileModal();
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !document.getElementById("fileModalOverlay").hidden) closeFileModal();
+  const overlay = document.getElementById("fileModalOverlay");
+  if (overlay.hidden) return;
+  if (e.key === "Escape") { closeFileModal(); return; }
+  // Focus trap: mientras el modal está abierto, Tab circula solo dentro de él.
+  if (e.key === "Tab") {
+    const focusables = overlay.querySelectorAll(
+      'button, a[href], input, [tabindex]:not([tabindex="-1"])'
+    );
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last  = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault(); last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault(); first.focus();
+    } else if (!overlay.contains(document.activeElement)) {
+      e.preventDefault(); first.focus();
+    }
+  }
 });
 
 // Botón limpiar
@@ -1148,7 +1244,7 @@ document.getElementById("bodyInput").addEventListener("input", updateCharCounter
 //  Renderizado
 // ═══════════════════════════════════════════════════════
 
-function renderResults({ senderResult, subjectResult, bodyResult, urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo }) {
+function renderResults({ senderResult, subjectResult, bodyResult, urlResult, urlError, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo }) {
   const container = document.getElementById("results");
   container.innerHTML = "";
 
@@ -1162,6 +1258,11 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, all
              : urlResult.verdict === "safe"      ? "safe"
              :                                     "warn";
   } else if (shorteners.length > 0 || (trackerInfo && trackerInfo.size > 0)) {
+    urlState = "warn";
+  }
+  // URLs que el servidor no pudo verificar (hosts internos/privados)
+  // nunca dejan el estado en "safe".
+  if (urlState === "safe" && urlResult?.results?.some(r => r.verdict === "unverified")) {
     urlState = "warn";
   }
   // Trackers, acortadores y redirects genéricos ocultan o reemplazan el destino real
@@ -1251,7 +1352,7 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, all
     container.appendChild(buildBodySection(bodyResult));
   }
   if (urlResult || allUrls.length > 0) {
-    container.appendChild(buildUrlSection(urlResult, allUrls, shorteners, trackerInfo || new Map(), realUrlToTracker || new Map(), spoofedUrls || new Map(), redirectInfo || new Map(), evasionTechniques || []));
+    container.appendChild(buildUrlSection(urlResult, allUrls, shorteners, trackerInfo || new Map(), realUrlToTracker || new Map(), spoofedUrls || new Map(), redirectInfo || new Map(), evasionTechniques || [], urlError));
   }
 
   // Nota al pie
@@ -1334,7 +1435,7 @@ function buildBodySection(b) {
   return section;
 }
 
-function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo, evasionTechniques = []) {
+function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo, evasionTechniques = [], urlError = null) {
   // Mapa rápido: url → resultado del servidor
   const resultMap = new Map(
     (urlResult?.results ?? allUrls.map(u => ({ url: u, verdict: "unknown", threats: [] })))
@@ -1442,6 +1543,10 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
     } else if (r.verdict === "safe") {
       cls = "url-safe";
       verdictText = "✓ Sin amenazas";
+    } else if (r.verdict === "unverified") {
+      // El servidor excluyó esta URL de las APIs (host privado/interno).
+      cls = "url-warn";
+      verdictText = "⚠ No verificable — apunta a una dirección interna o privada";
     } else {
       cls = "url-unknown";
       verdictText = "? Sin verificar";
@@ -1586,8 +1691,10 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
           Fuentes consultadas: ${esc(urlResult.source)}
         </div>` : ""}
       ${!urlResult && displayUrls.length > 0 ? `
-        <div style="font-size:12px;color:var(--muted);margin-top:8px">
-          No se pudo contactar con el servidor de verificación.
+        <div style="font-size:12px;color:var(--warn);margin-top:8px">
+          ⚠ Verificación del servidor no disponible: ${esc(urlError || "no se pudo contactar con el servidor.")}
+          El análisis heurístico local sigue siendo válido, pero las URLs no se
+          contrastaron con las bases de datos de amenazas.
         </div>` : ""}
     </div>`;
   return section;

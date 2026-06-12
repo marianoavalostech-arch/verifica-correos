@@ -17,7 +17,7 @@
   functions = "netlify/functions"
 
 [build.environment]
-  NODE_VERSION = "18"          # fetch nativo disponible desde Node 18
+  NODE_VERSION = "22"          # Node 18 llegó a EOL en abril de 2025; 22 es LTS
 
 [functions]
   node_bundler = "esbuild"     # bundler rápido, soporta ESM
@@ -30,6 +30,7 @@
 [[headers]]
   for = "/*"
   [headers.values]
+    Strict-Transport-Security  = "max-age=31536000; includeSubDomains"
     X-Frame-Options            = "DENY"
     X-Content-Type-Options     = "nosniff"
     Referrer-Policy            = "no-referrer"

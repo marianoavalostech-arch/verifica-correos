@@ -52,7 +52,8 @@ const CORS_HEADERS = {
 };
 
 // Solo se aceptan URLs con protocolo http(s) y longitud razonable.
-const VALID_URL_RE = /^https?:\/\/.{3,2000}$/;
+// 2048 coincide con el maxlength del input de URL en index.html.
+const VALID_URL_RE = /^https?:\/\/.{3,2048}$/;
 
 // --- Protección SSRF -------------------------------------------------------
 // followRedirects() hace fetch desde el servidor a URLs controladas por el
@@ -139,6 +140,14 @@ const MAX_ALLCHECK_URLS  = 300;
 // Evita disparar hasta MAX_ALLCHECK_URLS peticiones simultáneas con la misma
 // API key, lo que podría agotar cuotas o activar throttling/baneo temporal.
 const EXTERNAL_API_CONCURRENCY = 10;
+// Concurrencia máxima para el seguimiento de redirects (antes era ilimitada:
+// hasta 100 fetch simultáneos desde la función).
+const REDIRECT_CONCURRENCY = 10;
+// Presupuesto total de tiempo para la fase de redirects. Las funciones
+// síncronas de Netlify tienen ~10 s de límite; sin presupuesto, el peor caso
+// era 3 saltos × (HEAD 5s + GET 5s) = 30 s por URL → timeout 502.
+const REDIRECT_PHASE_BUDGET_MS = 6500;
+const REDIRECT_FETCH_TIMEOUT_MS = 4000;
 
 /**
  * Aplica `fn` a cada elemento de `items`, ejecutando como máximo `limit`
@@ -170,7 +179,7 @@ async function queryGSB(urls, apiKey) {
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       signal: ctrl.signal,
       body: JSON.stringify({
-        client: { clientId: "verifica-correos", clientVersion: "1.4.0" },
+        client: { clientId: "verifica-correos", clientVersion: "1.5.0" },
         threatInfo: {
           threatTypes:      GSB_THREAT_TYPES,
           platformTypes:    ["ANY_PLATFORM"],
@@ -333,7 +342,7 @@ async function queryVirusTotal(url, apiKey) {
  * `unsafeUrls` contiene los saltos que apuntan a hosts privados/internos
  * y que por tanto NO deben enviarse a las APIs externas de amenazas.
  */
-async function followRedirects(startUrl, maxHops = 3) {
+async function followRedirects(startUrl, maxHops = 3, deadline = Infinity) {
   const BROWSER_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -351,11 +360,22 @@ async function followRedirects(startUrl, maxHops = 3) {
   for (let i = 0; i < maxHops; i++) {
     let location = null;
 
-    // Intenta HEAD; si falla o responde 405/400 sin redirect, prueba GET.
+    // Intenta HEAD; si falla (error de red), responde 405/400 o devuelve
+    // 2xx sin redirigir, reintenta con GET (algunos servidores responden
+    // 200 a HEAD pero 302 a GET).
     for (const method of ["HEAD", "GET"]) {
+      // Presupuesto de tiempo: si la fase de redirects agotó su budget
+      // global, se devuelve la cadena parcial en lugar de exceder el
+      // límite de ejecución de la función (~10 s).
+      const remaining = deadline - Date.now();
+      if (remaining <= 200) return { chain, unsafeUrls };
+
       const ctrl = new AbortController();
-      const tid  = setTimeout(() => ctrl.abort(), 5000);
-      let resp;
+      const tid  = setTimeout(
+        () => ctrl.abort(),
+        Math.min(REDIRECT_FETCH_TIMEOUT_MS, remaining)
+      );
+      let resp = null;
       try {
         resp = await fetch(current, {
           method,
@@ -364,20 +384,17 @@ async function followRedirects(startUrl, maxHops = 3) {
           headers:  { "User-Agent": BROWSER_UA },
         });
       } catch {
+        // HEAD falló por red/timeout → se reintenta con GET; si falló GET, fin.
+      } finally {
         clearTimeout(tid);
-        break;
       }
-      clearTimeout(tid);
 
-      if (resp.status >= 300 && resp.status < 400) {
+      if (resp && resp.status >= 300 && resp.status < 400) {
         location = resp.headers.get("location");
         break;                          // redirect encontrado
       }
-      // HEAD rechazado → probar GET
-      if (method === "HEAD" && (resp.status === 405 || resp.status === 400)) {
-        continue;
-      }
-      break;                            // 2xx u otro código → no hay redirect
+      // HEAD sin redirect (error, 405, 400, 2xx…) → probar GET.
+      // Tras GET el bucle termina solo.
     }
 
     if (!location) break;
@@ -415,6 +432,17 @@ export default async function handler(req) {
   }
   if (req.method !== "POST") {
     return json({ error: "Method not allowed" }, 405);
+  }
+
+  // SEGURIDAD: el header CORS solo restringe a los navegadores; no impide
+  // que un script (curl, bot) consuma las API keys. Si ALLOWED_ORIGIN está
+  // configurada, se exige además que el header Origin coincida exactamente.
+  // (Los navegadores siempre envían Origin en un POST con fetch.)
+  if (process.env.ALLOWED_ORIGIN) {
+    const origin = req.headers.get("origin") || "";
+    if (origin !== process.env.ALLOWED_ORIGIN) {
+      return json({ error: "Origen no permitido" }, 403);
+    }
   }
 
   // SEGURIDAD: rechazar payloads excesivamente grandes antes de parsear.
@@ -466,15 +494,16 @@ export default async function handler(req) {
 
   // Seguir redirects HTTP para detectar cadenas multi-salto
   // (ej: redirector corporativo → landing → página de phishing real).
+  // Concurrencia acotada (REDIRECT_CONCURRENCY) + presupuesto global de
+  // tiempo (REDIRECT_PHASE_BUDGET_MS) para no exceder el límite de la función.
   const redirectChainMap = new Map(); // url original → { chain, unsafeUrls }
   const unsafeUrlSet     = new Set(); // saltos a hosts privados/internos (no se consultan)
-  await Promise.all(
-    batch.map(async (url) => {
-      const result = await followRedirects(url);
-      redirectChainMap.set(url, result);
-      for (const u of result.unsafeUrls) unsafeUrlSet.add(u);
-    })
-  );
+  const redirectDeadline = Date.now() + REDIRECT_PHASE_BUDGET_MS;
+  await mapLimit(batch, REDIRECT_CONCURRENCY, async (url) => {
+    const result = await followRedirects(url, 3, redirectDeadline);
+    redirectChainMap.set(url, result);
+    for (const u of result.unsafeUrls) unsafeUrlSet.add(u);
+  });
 
   // URLs únicas a verificar: originales + todos los saltos descubiertos,
   // excluyendo los que apuntan a hosts privados/internos (SSRF).
@@ -517,9 +546,18 @@ export default async function handler(req) {
     const chain   = redirectChainMap.get(url)?.chain || [url];
     const threats = [...new Set(chain.flatMap(u => threatsByUrl.get(u) || []))];
     const redirectHops = chain.slice(1);
+    // SEGURIDAD/UX: una URL que apunta a un host privado/interno se excluye
+    // de las APIs externas (anti-SSRF), por lo que NUNCA debe reportarse
+    // como "safe" — se marca "unverified" para que la UI muestre
+    // "Sin verificar" en lugar de "Sin amenazas".
+    const verdict = threats.length
+      ? "dangerous"
+      : unsafeUrlSet.has(url)
+      ? "unverified"
+      : "safe";
     return {
       url,
-      verdict: threats.length ? "dangerous" : "safe",
+      verdict,
       threats,
       ...(redirectHops.length > 0 && { redirectChain: redirectHops }),
     };
@@ -561,3 +599,4 @@ export const config = {
     aggregateBy: ["ip", "domain"],
   },
 };
+// (v1.5.0)

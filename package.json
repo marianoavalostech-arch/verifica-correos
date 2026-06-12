@@ -1,15 +1,15 @@
 {
   "name": "verifica-correos",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "description": "Herramienta gratuita para detectar phishing en correos electrónicos",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "scripts": {
     "dev": "netlify dev"
   },
   "devDependencies": {
-    "netlify-cli": "^17.0.0"
+    "netlify-cli": "^26.0.0"
   }
 }

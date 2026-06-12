@@ -78,8 +78,69 @@ function detectMagic(bytes) {
   return { hex: "", family: "binary", label: "Binario desconocido" };
 }
 
-// ── Parser ZIP minimalista (solo cabeceras locales) ────
+// ── Parser ZIP ──────────────────────────────────────────
+// Estrategia principal: leer el CENTRAL DIRECTORY (vía EOCD). A diferencia
+// de las cabeceras locales, el central directory siempre contiene los
+// tamaños reales — los ZIP con "data descriptors" (flag bit 3) dejan los
+// tamaños locales en 0, lo que permitía evadir la detección de zip bombs
+// y marcaba como "truncados" archivos válidos.
+// Fallback: recorrido de cabeceras locales (ZIPs corruptos/sin EOCD).
+
+function parseZipCentralDirectory(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // Buscar EOCD (PK\x05\x06) desde el final; el comentario puede ocupar
+  // hasta 64 KB, así que se escanean los últimos 64 KB + 22 bytes.
+  const minEocd = 22;
+  if (bytes.length < minEocd) return null;
+  const scanStart = Math.max(0, bytes.length - 65536 - minEocd);
+  let eocd = -1;
+  for (let i = bytes.length - minEocd; i >= scanStart; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd === -1) return null;
+
+  const totalEntries = view.getUint16(eocd + 10, true);
+  const cdOffset     = view.getUint32(eocd + 16, true);
+  // ZIP64 (offset/count saturados) → no soportado aquí, usar fallback
+  if (cdOffset === 0xffffffff || totalEntries === 0xffff) return null;
+  if (cdOffset >= bytes.length) return null;
+
+  const entries = [];
+  let totalCompressed = 0;
+  let totalUncompressed = 0;
+  let truncated = false;
+  let offset = cdOffset;
+
+  while (entries.length < totalEntries && offset + 46 <= bytes.length) {
+    if (view.getUint32(offset, true) !== 0x02014b50) break; // PK\x01\x02
+    if (entries.length >= MAX_ZIP_ENTRIES) { truncated = true; break; }
+    const compSize   = view.getUint32(offset + 20, true);
+    const uncompSize = view.getUint32(offset + 24, true);
+    const nameLen    = view.getUint16(offset + 28, true);
+    const extraLen   = view.getUint16(offset + 30, true);
+    const commentLen = view.getUint16(offset + 32, true);
+    const nameBytes  = bytes.slice(offset + 46, offset + 46 + nameLen);
+    const name       = new TextDecoder("utf-8", { fatal: false }).decode(nameBytes);
+
+    entries.push({ name, compSize, uncompSize });
+    totalCompressed   += compSize;
+    totalUncompressed += uncompSize;
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+
+  if (entries.length === 0) return null;
+  if (entries.length < totalEntries && !truncated) truncated = true;
+  return { entries, totalCompressed, totalUncompressed, truncated };
+}
+
 function parseZip(bytes) {
+  const central = parseZipCentralDirectory(bytes);
+  if (central) return central;
+  return parseZipLocalHeaders(bytes);
+}
+
+// ── Fallback: cabeceras locales ─────────────────────────
+function parseZipLocalHeaders(bytes) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const entries = [];
   let offset = 0;

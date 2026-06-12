@@ -115,27 +115,34 @@ Sin ninguna variable, el servidor solo sigue redirects HTTP (sin verificar contr
 ## Estructura del proyecto
 
 ```
-├── index.html                    # UI principal
-├── app.css                       # Estilos
-├── app.js                        # Lógica del cliente (heurística, DNS, decodificación de redirects)
+├── public/
+│   ├── index.html                # UI principal
+│   ├── app.css                   # Estilos
+│   ├── app.js                    # Lógica del cliente (heurística, DNS, decodificación de redirects)
+│   └── file-worker.js            # Análisis local de archivos adjuntos (Web Worker)
 ├── netlify/functions/
-│   └── check.js                  # Función serverless (APIs de amenazas + seguimiento de redirects HTTP)
-├── netlify.toml                  # Configuración de Netlify (alias /check, rate limiting)
+│   └── check.mjs                 # Función serverless (APIs de amenazas + seguimiento de redirects HTTP)
+├── netlify.toml                  # Configuración de Netlify (headers de seguridad)
 └── .env.example                  # Variables de entorno de ejemplo
 ```
+
+## Análisis de archivos adjuntos (100 % local)
+
+Además del correo, la herramienta puede analizar un archivo adjunto **sin subirlo a internet**: todo ocurre en un Web Worker del navegador. Se calcula el hash SHA-256 (con enlace para buscarlo en VirusTotal), se detecta el tipo real por firma binaria (magic bytes) y se compara con la extensión declarada (incluye doble extensión tipo `factura.pdf.exe`), se inspecciona la estructura ZIP/OOXML leyendo el central directory (macros VBA, ejecutables embebidos, heurística de zip bomb) y, en PDFs, se buscan elementos activos (`/JavaScript`, `/OpenAction`, `/Launch`, `/EmbeddedFile`). Límite: 25 MB.
 
 ## Límites y rate limiting
 
 - La función serverless acepta hasta **100 URLs por llamada**.
 - El seguimiento de redirects HTTP verifica hasta **300 URLs únicas** por llamada (originales + saltos descubiertos).
-- Rate limiting: **20 requests por minuto por IP**, configurado en `netlify/functions/check.js` (`exports.config.rateLimit`). Protege la cuota diaria de Google Safe Browsing (~10.000 req/día en el plan gratuito).
+- El seguimiento de redirects tiene un **presupuesto global de ~6,5 s** (concurrencia 10): si se agota, se devuelven cadenas parciales en lugar de exceder el límite de ejecución de la función (~10 s).
+- Rate limiting: **20 requests por minuto por IP**, configurado en `netlify/functions/check.mjs` (`export const config.rateLimit`). Protege la cuota diaria de Google Safe Browsing (~10.000 req/día en el plan gratuito). **Nota:** la disponibilidad del rate limiting declarativo depende del plan de Netlify — verifica en los deploy logs que la regla se registre.
 
 ## Seguridad
 
-- **Anti-SSRF:** antes de seguir redirects, el servidor valida que cada URL apunte a un host público. Se rechazan `localhost`, dominios `.local`/`.internal`, IPs privadas literales (10/8, 127/8, 169.254/16, 172.16/12, 192.168/16, CGNAT, IPv6 ULA/link-local) y hostnames que resuelven a IPs privadas.
-- **CORS:** configura `ALLOWED_ORIGIN` en producción; sin ella el endpoint acepta peticiones desde cualquier origen y terceros pueden consumir tus cuotas de API.
+- **Anti-SSRF:** antes de seguir redirects, el servidor valida que cada URL apunte a un host público. Se rechazan `localhost`, dominios `.local`/`.internal`, IPs privadas literales (10/8, 127/8, 169.254/16, 172.16/12, 192.168/16, CGNAT, IPv6 ULA/link-local) y hostnames que resuelven a IPs privadas. Las URLs excluidas se reportan con veredicto `unverified` (nunca "sin amenazas"). *Riesgo residual conocido:* la validación resuelve DNS antes del fetch (ventana TOCTOU de DNS rebinding); el impacto es bajo porque el body de las respuestas nunca se devuelve al cliente.
+- **CORS + Origin:** configura `ALLOWED_ORIGIN` en producción. Con ella definida, el servidor además **rechaza con 403** cualquier petición cuyo header `Origin` no coincida (el header CORS por sí solo no impide el abuso desde scripts). Sin ella, el endpoint acepta peticiones desde cualquier origen y terceros pueden consumir tus cuotas de API.
 - **API keys:** la clave de Google Safe Browsing viaja en el header `x-goog-api-key` (no en la URL) para evitar exposición en logs.
-- **Límites de entrada:** body máximo 50 KB, solo URLs `http(s)` de hasta 2000 caracteres.
+- **Límites de entrada:** body máximo 50 KB (el cliente recorta su payload a ~45 KB), solo URLs `http(s)` de hasta 2048 caracteres.
 
 ## Limitaciones conocidas
 
