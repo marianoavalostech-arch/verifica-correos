@@ -1597,21 +1597,30 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
     let redirectBlock = "";
     if (redirectRealUrl) {
       const isObfuscatedDest = hasObfuscatedRedirectParam(redirectRealUrl);
+
+      // Reputación del dominio destino según las APIs (siempre se muestra,
+      // independientemente de si el parámetro ?src= está cifrado o no).
       let rColor, rText;
       if (redirectRealResult?.verdict === "dangerous") {
         const threats = (redirectRealResult.threats || []).map(t => THREAT_LABELS[t] || t).join(", ");
         rColor = "var(--danger)";
         rText  = "⚠ " + (threats || "AMENAZA DETECTADA en destino");
-      } else if (isObfuscatedDest) {
-        rColor = "var(--warn)";
-        rText  = "⚠ Parámetros cifrados — destino final NO verificable";
       } else if (redirectRealResult?.verdict === "safe") {
         rColor = "var(--accent)";
-        rText  = "✓ Sin amenazas en el destino (según bases de datos actuales)";
+        rText  = "✓ Dominio no figura en listas negras";
       } else {
         rColor = "var(--muted)";
-        rText  = "? Sin verificar";
+        rText  = "? Sin verificar (servidor no disponible)";
       }
+
+      // Nota adicional cuando el parámetro destino está cifrado: el dominio
+      // fue verificado pero el destino FINAL dentro del ?src= sigue siendo desconocido.
+      const obfuscatedNote = isObfuscatedDest
+        ? `<div style="margin-top:5px;font-family:var(--mono);font-size:10px;
+                       color:var(--warn)">
+             ⚠ Parámetros cifrados — el destino final dentro del ?src= es desconocido
+           </div>`
+        : "";
 
       // Saltos HTTP subsiguientes del destino decodificado
       // Ej: videos.guidemesupport.com → mdayanahsan.online/amez/
@@ -1640,6 +1649,7 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
           </div>
           <div style="font-family:var(--mono);font-size:11px;font-weight:700;
                       color:${rColor}">${esc(rText)}</div>
+          ${obfuscatedNote}
           ${hopChainHtml}
         </div>`;
     }
