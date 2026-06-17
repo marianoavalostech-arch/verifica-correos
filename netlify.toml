@@ -8,6 +8,7 @@
 #      ABUSECH_AUTH_KEY         = <tu clave>          (recomendada — gratuita en auth.abuse.ch;
 #                                                      sin ella URLhaus y ThreatFox no responden)
 #      VIRUSTOTAL_API_KEY       = <tu clave>          (opcional — amplía cobertura)
+#      URLSCAN_API_KEY          = <tu clave>          (opcional — captura del destino en sandbox; gratuita en urlscan.io)
 #      ALLOWED_ORIGIN           = https://tu-sitio.netlify.app  (OBLIGATORIA en producción)
 #   4. Haz redeploy.
 

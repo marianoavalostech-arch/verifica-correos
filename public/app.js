@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════
 
 const CHECK_ENDPOINT = "/check";
+const SANDBOX_ENDPOINT = "/sandbox";
 
 const STD_NOTE =
   "Resultado orientativo. Ninguna herramienta detecta el 100 % de las amenazas. " +
@@ -2054,6 +2055,93 @@ function downloadTextReport() {
   URL.revokeObjectURL(a.href);
 }
 
+// ═══════════════════════════════════════════════════════
+//  Captura en sandbox remoto (urlscan.io) — opt-in y manual
+// ═══════════════════════════════════════════════════════
+// El renderizado del sitio final ocurre en urlscan.io (entorno aislado), NUNCA
+// en el equipo del usuario. El navegador solo habla con nuestra función /sandbox,
+// que devuelve la captura como data URL base64 (compatible con la CSP).
+
+async function sandboxPost(payload) {
+  const resp = await fetch(SANDBOX_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await resp.json().catch(() => null);
+  return { ok: resp.ok, status: resp.status, data };
+}
+
+function renderSandboxResult(box, d) {
+  const vColor = d.malicious ? "var(--danger)" : "var(--accent)";
+  const vText  = d.malicious
+    ? `⚠ urlscan.io lo marca como MALICIOSO (score ${d.score})`
+    : `Sin veredicto malicioso en urlscan.io (score ${d.score})`;
+  box.innerHTML = `
+    <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">
+      Captura del destino final (sandbox urlscan.io)
+    </div>
+    ${d.finalUrl ? `<div class="url-text" style="margin-bottom:4px">URL final: ${esc(d.finalUrl)}</div>` : ""}
+    <div style="font-size:11px;font-weight:700;color:${vColor};margin-bottom:6px">${esc(vText)}</div>
+    ${d.screenshot
+      ? `<img src="${d.screenshot}" alt="Captura del destino renderizada en sandbox"
+              style="max-width:100%;display:block;border-radius:6px;border:1px solid var(--border)">`
+      : `<div style="font-size:11px;color:var(--muted)">urlscan no almacenó una captura para este destino.</div>`}
+    ${d.reportUrl
+      ? `<div style="margin-top:6px;font-size:11px">
+           <a href="${esc(d.reportUrl)}" target="_blank" rel="noopener noreferrer"
+              style="color:var(--accent)">Ver informe completo en urlscan.io ↗</a>
+         </div>`
+      : ""}
+    <div style="margin-top:6px;font-size:10px;color:var(--muted)">
+      La imagen se generó en un entorno remoto aislado; el enlace nunca se abrió en tu equipo.
+    </div>`;
+}
+
+async function runSandboxScan(btn) {
+  const box = btn.closest(".sandbox-box");
+  if (!box) return;
+  const status = box.querySelector(".sandbox-status");
+  let url;
+  try { url = decodeURIComponent(btn.dataset.url || ""); } catch { url = btn.dataset.url || ""; }
+  if (!url) return;
+
+  btn.disabled = true;
+  btn.style.opacity = ".6";
+  status.textContent = "Enviando al sandbox… (el análisis puede tardar ~30 s)";
+
+  try {
+    const sub = await sandboxPost({ action: "submit", url });
+    if (!sub.ok || !sub.data?.uuid) {
+      status.textContent = "✕ " + (sub.data?.error || "No se pudo iniciar el escaneo.");
+      btn.disabled = false; btn.style.opacity = "";
+      return;
+    }
+    const uuid = sub.data.uuid;
+
+    // Polling: primera espera más larga (urlscan necesita arrancar), luego cada ~3,5 s.
+    let done = null;
+    for (let i = 0; i < 14; i++) {
+      await new Promise(r => setTimeout(r, i === 0 ? 6000 : 3500));
+      status.textContent = `Analizando en sandbox… (intento ${i + 1})`;
+      const res = await sandboxPost({ action: "result", uuid });
+      if (res.data?.status === "done") { done = res.data; break; }
+      if (res.data?.error) { status.textContent = "✕ " + res.data.error; btn.disabled = false; btn.style.opacity = ""; return; }
+    }
+
+    if (!done) {
+      status.textContent = "⏱ El sandbox tardó demasiado. Probá de nuevo en un momento.";
+      btn.disabled = false; btn.style.opacity = "";
+      return;
+    }
+    renderSandboxResult(box, done);
+  } catch {
+    status.textContent = "✕ Error de red al contactar con el sandbox.";
+    btn.disabled = false; btn.style.opacity = "";
+  }
+}
+
 function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo, evasionTechniques = [], urlError = null, urlHeuristics = null) {
   // Mapa rápido: url → resultado del servidor
   const resultMap = new Map(
@@ -2134,6 +2222,10 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
           <span style="font-size:12px;color:var(--text)">${esc(t.label)}</span>
         </div>`).join("")}
     </div>` : "";
+
+  // Captura en sandbox: solo si el usuario marcó el checkbox (opt-in).
+  const sandboxEnabled = typeof document !== "undefined"
+    && !!document.getElementById("sandboxToggle")?.checked;
 
   const itemsHtml = displayUrls.map(url => {
     const r          = resultMap.get(url) ?? { url, verdict: "unknown", threats: [] };
@@ -2316,6 +2408,18 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
             </div>`).join("")}
         </div>`;
     }
+    let sandboxBox = "";
+    if (sandboxEnabled) {
+      sandboxBox = `
+        <div class="sandbox-box" style="margin-top:8px">
+          <button type="button" class="btn-secondary sandbox-btn"
+                  data-url="${esc(encodeURIComponent(url))}"
+                  style="font-size:11px;padding:6px 10px">
+            📷 Ver captura del destino (sandbox remoto)
+          </button>
+          <div class="sandbox-status" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+        </div>`;
+    }
 
     return `<div class="url-item ${cls}">
               <div class="url-text">${esc(url)}</div>
@@ -2324,6 +2428,7 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
               ${realUrlBlock}
               ${redirectBlock}
               ${serverChainBlock}
+              ${sandboxBox}
             </div>`;
   }).join("");
 
@@ -2350,5 +2455,14 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
           contrastaron con las bases de datos de amenazas.
         </div>` : ""}
     </div>`;
+
+  // Delegación: lanzar la captura en sandbox al pulsar el botón de cualquier URL.
+  if (sandboxEnabled) {
+    section.addEventListener("click", (e) => {
+      const btn = e.target.closest?.(".sandbox-btn");
+      if (btn && !btn.disabled) runSandboxScan(btn);
+    });
+  }
+
   return section;
 }
