@@ -41,6 +41,10 @@ const URL_SHORTENERS = new Set([
   "x.co","su.pr","snip.ly","mcaf.ee","po.st","hyperurl.co",
   "lnnk.in","zpr.io","go2l.ink","tr.im","cli.gs","1url.com",
   "urlo.ws","2url.net","multiurl.com","chilp.it",
+  // Acortadores genéricos .uk/.link/.to y similares (vistos en phishing real)
+  "shortlink.uk","short.gy","kutt.it","t.ly","tinu.be","l.ink",
+  "shorturl.gg","spoo.me","linkr.it","da.gd","gg.gg","u.to",
+  "ulvis.net","clicky.me","shorten.ee","2ty.cc","tny.im",
 ]);
 
 // Plataformas de email marketing que usan redirección de enlaces
@@ -451,6 +455,151 @@ function decodeTrackerRealUrl(url) {
     }
   } catch {}
   return null;
+}
+
+// ═══════════════════════════════════════════════════════
+//  Heurística de URL (independiente de listas negras)
+// ═══════════════════════════════════════════════════════
+// Estas funciones detectan señales de phishing que los blocklists NO ven en
+// campañas nuevas (zero-day): un dominio recién creado o un acortador nuevo
+// no está todavía en Google Safe Browsing / URLhaus / VirusTotal, así que
+// salen como "limpios". La heurística añade una capa de sospecha estructural.
+
+/**
+ * Extrae direcciones de correo incrustadas en la RUTA, QUERY o FRAGMENTO de
+ * una URL (no en la autoridad user@host, que ya cubre detectUrlSpoofing).
+ * Un email dentro de los parámetros es una señal fuerte de phishing dirigido:
+ * el atacante pre-rellena el formulario con la víctima o rastrea quién hizo
+ * clic. Ej.: https://shortlink.uk/x?operaciones@empresa.com=...
+ * Decodifica %40 → @ para no perder emails ofuscados.
+ */
+function extractEmbeddedEmails(url) {
+  let rest = url;
+  try {
+    const u = new URL(url);
+    // Solo ruta + query + fragmento: se descarta la autoridad (user:pass@host).
+    rest = (u.pathname || "") + (u.search || "") + (u.hash || "");
+  } catch { /* si no parsea, se escanea la cadena completa */ }
+
+  const variants = [rest];
+  try { variants.push(decodeURIComponent(rest)); } catch {}
+
+  const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+  const out = new Set();
+  for (const text of variants) {
+    for (const m of text.match(EMAIL_RE) || []) out.add(m.toLowerCase());
+  }
+  return [...out];
+}
+
+/**
+ * Heurística genérica de acortador para los que NO están en URL_SHORTENERS.
+ * Patrón: nombre de host que sugiere acortamiento (short/tiny/link/url/clic…)
+ * + una única ruta corta y alfanumérica (ej. /1x1Ur). Señal DÉBIL (puntaje
+ * bajo) por riesgo de falsos positivos: muchos sitios legítimos usan rutas
+ * cortas, por eso se exige además que el nombre del host sea sugerente.
+ */
+function looksLikeGenericShortener(url) {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, "");
+    if (URL_SHORTENERS.has(host)) return false; // ya cubierto por la lista fija
+    const segs = u.pathname.split("/").filter(Boolean);
+    const oneShortSeg = segs.length === 1 && /^[A-Za-z0-9_-]{4,14}$/.test(segs[0]);
+    if (!oneShortSeg) return false;
+    // Nombre claramente de acortador. Se evitan substrings ambiguos ("tin" en
+    // tinder, "url" en figural…): solo stems inequívocos, o un host muy corto
+    // (≤5 chars) bajo un TLD típico de acortadores (.ly/.gg/.gd/.id/.to…).
+    const strongName =
+      /(short|shorten|tinyurl|cutt|kutt|redir|shrink|snip|trimurl)/i.test(host) ||
+      /^[a-z0-9]{1,5}\.(ly|gg|gd|id|to|cc|sh|me|it|tl|ws|cm)$/i.test(host);
+    return strongName;
+  } catch { return false; }
+}
+
+/**
+ * Motor heurístico: recibe las URLs originales + los destinos descubiertos
+ * (redirects del servidor, trackers decodificados, parámetros ?url=) y
+ * devuelve, por URL, una lista de señales con puntaje. Hace además consultas
+ * RDAP/WHOIS de antigüedad por dominio organizacional único (con tope, para
+ * no disparar decenas de peticiones).
+ *
+ * Devuelve { perUrl: Map<url, {score, signals:[{label,score}]}>, ageByDomain }.
+ */
+async function analyzeUrlHeuristics(allUrls, urlResult, redirectInfo, trackerInfo) {
+  const perUrl = new Map();
+  const add = (url, label, score) => {
+    if (!url) return;
+    if (!perUrl.has(url)) perUrl.set(url, { score: 0, signals: [] });
+    const e = perUrl.get(url);
+    if (e.signals.some(s => s.label === label)) return; // sin duplicados
+    e.signals.push({ label, score });
+    e.score = Math.min(100, e.score + score); // señales independientes suman (cap 100)
+  };
+
+  // Conjunto de URLs a inspeccionar: originales + destinos descubiertos.
+  const urlsToInspect = new Set(allUrls || []);
+  if (redirectInfo) for (const dest of redirectInfo.values()) urlsToInspect.add(dest);
+  if (trackerInfo)  for (const t of trackerInfo.values()) if (t?.realUrl) urlsToInspect.add(t.realUrl);
+  for (const r of (urlResult?.results || [])) {
+    for (const hop of (r.redirectChain || [])) urlsToInspect.add(hop);
+  }
+
+  // ── Señales sin red (síncronas) ──
+  for (const url of urlsToInspect) {
+    const emails = extractEmbeddedEmails(url);
+    if (emails.length) {
+      add(url, `Email incrustado en la URL (${emails[0]}) — típico de phishing dirigido`, 35);
+    }
+    if (looksLikeGenericShortener(url)) {
+      add(url, "Patrón de acortador no listado — el destino real está oculto", 20);
+    }
+    try {
+      const host = new URL(url).hostname.replace(/^www\./, "");
+      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+        add(url, "El host es una IP literal en lugar de un dominio", 35);
+      } else {
+        const tld = host.split(".").pop();
+        if (SUSPICIOUS_TLDS.has(tld)) add(url, `TLD ".${tld}" de alto abuso en phishing`, 20);
+        const { suffixLen } = getDomainInfo(host);
+        const sub = host.split(".").length - suffixLen - 1;
+        if (sub >= 3) add(url, `${sub} niveles de subdominio (inusual en sitios legítimos)`, 15);
+      }
+    } catch {}
+  }
+
+  // ── Redirects múltiples (cadena descubierta por el servidor) ──
+  for (const r of (urlResult?.results || [])) {
+    const hops = r.redirectChain?.length || 0;
+    if (hops >= 3)      add(r.url, `Cadena de ${hops} redirects HTTP encadenados — ocultamiento del destino`, 35);
+    else if (hops === 2) add(r.url, "2 redirects HTTP encadenados antes del destino", 20);
+  }
+
+  // ── Antigüedad de dominio vía RDAP/WHOIS (dominio organizacional único) ──
+  const orgByUrl  = new Map();
+  const orgDomains = new Set();
+  for (const url of urlsToInspect) {
+    try {
+      const host = new URL(url).hostname.replace(/^www\./, "");
+      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) continue;
+      const { orgDomain } = getDomainInfo(host);
+      orgByUrl.set(url, orgDomain);
+      orgDomains.add(orgDomain);
+    } catch {}
+  }
+  const ageByDomain = new Map();
+  const domains = [...orgDomains].slice(0, 12); // tope de consultas RDAP
+  await Promise.all(domains.map(async (d) => {
+    ageByDomain.set(d, await rdapDomainAge(d));
+  }));
+  for (const [url, org] of orgByUrl) {
+    const age = ageByDomain.get(org);
+    if (age == null) continue;
+    if (age < 30)       add(url, `Dominio "${org}" registrado hace ${age} día${age === 1 ? "" : "s"} (WHOIS/RDAP)`, 45);
+    else if (age < 180) add(url, `Dominio "${org}" registrado hace ~${Math.floor(age / 30)} mes${Math.floor(age / 30) === 1 ? "" : "es"} (WHOIS/RDAP)`, 20);
+  }
+
+  return { perUrl, ageByDomain };
 }
 
 // ═══════════════════════════════════════════════════════
@@ -942,7 +1091,14 @@ document.getElementById("analyzeBtn").addEventListener("click", async () => {
     const subjectResult = analyzeSubject(subject);
     const bodyResult    = analyzeBody(body);
 
-    renderResults({ senderResult, subjectResult, bodyResult, urlResult, urlError, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo });
+    // Heurística propia (acortadores, redirects múltiples, emails incrustados,
+    // dominios jóvenes vía WHOIS/RDAP). No depende de las listas negras: aporta
+    // sospecha estructural cuando el servidor dice "limpia".
+    const urlHeuristics = allUrls.length > 0
+      ? await analyzeUrlHeuristics(allUrls, urlResult, redirectInfo, trackerInfo)
+      : null;
+
+    renderResults({ senderResult, subjectResult, bodyResult, urlResult, urlError, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo, urlHeuristics });
 
     setTimeout(() => {
       document.getElementById("results").scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -1334,7 +1490,7 @@ document.getElementById("bodyInput").addEventListener("input", updateCharCounter
 //  Renderizado
 // ═══════════════════════════════════════════════════════
 
-function renderResults({ senderResult, subjectResult, bodyResult, urlResult, urlError, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo }) {
+function renderResults({ senderResult, subjectResult, bodyResult, urlResult, urlError, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo, urlHeuristics }) {
   const container = document.getElementById("results");
   container.innerHTML = "";
 
@@ -1364,6 +1520,19 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, url
   )) {
     urlState = "warn";
   }
+  // Puntaje heurístico máximo entre todas las URLs (incluye destinos).
+  let heuristicMax = 0;
+  if (urlHeuristics?.perUrl) {
+    for (const e of urlHeuristics.perUrl.values()) {
+      heuristicMax = Math.max(heuristicMax, e.score);
+    }
+  }
+  // La heurística NUNCA debe dejar el banner en "safe": si hay señales
+  // estructurales (≥20) aunque las listas negras estén limpias, se baja a "warn".
+  if (heuristicMax >= 20 && (urlState === "safe" || urlState === null) && allUrls.length > 0) {
+    urlState = "warn";
+  }
+
   // Suplantación via @: siempre peligrosa, sobreescribe cualquier veredicto previo.
   if (spoofedUrls && spoofedUrls.size > 0) {
     urlState = "danger";
@@ -1398,6 +1567,21 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, url
   if (trackerInfo?.size > 0) {
     evasionTechniques.push({ label: "URL de tracking — enmascara el destino real", score: 20 });
   }
+  // Señales heurísticas (emails incrustados, dominios jóvenes, redirects
+  // múltiples, TLD de abuso…) agregadas por etiqueta con su puntaje máximo.
+  // Se evita duplicar las etiquetas ya presentes en evasionTechniques.
+  if (urlHeuristics?.perUrl) {
+    const byLabel = new Map();
+    for (const e of urlHeuristics.perUrl.values()) {
+      for (const s of e.signals) {
+        byLabel.set(s.label, Math.max(byLabel.get(s.label) || 0, s.score));
+      }
+    }
+    const shown = new Set(evasionTechniques.map(t => t.label));
+    for (const [label, score] of [...byLabel].sort((a, b) => b[1] - a[1])) {
+      if (!shown.has(label)) evasionTechniques.push({ label, score });
+    }
+  }
   const urlTechniqueScore = evasionTechniques.reduce((m, t) => Math.max(m, t.score), 0);
 
   // Puntaje de riesgo (máximo entre todas las dimensiones)
@@ -1421,6 +1605,7 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, url
     spoofedUrls: spoofedUrls || new Map(),
     redirectInfo: redirectInfo || new Map(),
     evasionTechniques: evasionTechniques || [],
+    urlHeuristics: urlHeuristics || null,
   };
 
   const globalHeadlines = {
@@ -1455,7 +1640,7 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, url
     container.appendChild(buildBodySection(bodyResult));
   }
   if (urlResult || allUrls.length > 0) {
-    container.appendChild(buildUrlSection(urlResult, allUrls, shorteners, trackerInfo || new Map(), realUrlToTracker || new Map(), spoofedUrls || new Map(), redirectInfo || new Map(), evasionTechniques || [], urlError));
+    container.appendChild(buildUrlSection(urlResult, allUrls, shorteners, trackerInfo || new Map(), realUrlToTracker || new Map(), spoofedUrls || new Map(), redirectInfo || new Map(), evasionTechniques || [], urlError, urlHeuristics || null));
   }
 
   // Nota al pie
@@ -1613,6 +1798,17 @@ Riesgo estimado: ${d.riskScore} / 100
 
   if (d.allUrls && d.allUrls.length > 0) {
     const resultMap = new Map((d.urlResult?.results ?? []).map(r => [r.url, r]));
+    const collectHeurTxt = (url) => {
+      if (!d.urlHeuristics?.perUrl) return [];
+      const acc = [];
+      const push = (u) => { const h = d.urlHeuristics.perUrl.get(u); if (h) acc.push(...h.signals); };
+      push(url);
+      const dest = d.redirectInfo?.get(url); if (dest) push(dest);
+      const tr = d.trackerInfo?.get(url); if (tr?.realUrl) push(tr.realUrl);
+      for (const hop of (resultMap.get(url)?.redirectChain || [])) push(hop);
+      const seen = new Set();
+      return acc.filter(s => !seen.has(s.label) && seen.add(s.label));
+    };
     txt += `${"─".repeat(58)}\nURLs ANALIZADAS (${d.allUrls.length})\n\n`;
     d.allUrls.forEach(url => {
       const r          = resultMap.get(url);
@@ -1620,6 +1816,7 @@ Riesgo estimado: ${d.riskScore} / 100
       const tracker    = d.trackerInfo?.get(url);
       const spoofing   = d.spoofedUrls?.get(url);
       const redirectReal = d.redirectInfo?.get(url);
+      const heurSignals = collectHeurTxt(url);
       let verdictText;
       if (spoofing) {
         verdictText = `[FALSIFICADA] Destino real: "${spoofing.realHost}" — no "${spoofing.fakeHost}"`;
@@ -1632,12 +1829,16 @@ Riesgo estimado: ${d.riskScore} / 100
         verdictText = `[REDIRECT] Destino: ${redirectReal}`;
       } else if (isShortener) {
         verdictText = "[ACORTADOR] Destino real oculto";
+      } else if (heurSignals.length) {
+        verdictText = "[HEURÍSTICA] Limpia en listas negras, pero con señales de phishing";
       } else if (r?.verdict === "safe") {
         verdictText = "[LIMPIA] Sin amenazas conocidas";
       } else {
         verdictText = "[SIN VERIFICAR]";
       }
-      txt += `  ${url}\n  → ${verdictText}\n\n`;
+      txt += `  ${url}\n  → ${verdictText}\n`;
+      heurSignals.forEach(s => { txt += `      · +${s.score} ${s.label}\n`; });
+      txt += "\n";
     });
   }
 
@@ -1728,12 +1929,25 @@ function buildHtmlReport(d) {
   // URLs
   if (d.allUrls && d.allUrls.length > 0) {
     const resultMap = new Map((d.urlResult?.results ?? []).map(r => [r.url, r]));
+    // Señales heurísticas por URL (incluye destinos asociados), deduplicadas.
+    const collectHeurReport = (url) => {
+      if (!d.urlHeuristics?.perUrl) return [];
+      const acc = [];
+      const push = (u) => { const h = d.urlHeuristics.perUrl.get(u); if (h) acc.push(...h.signals); };
+      push(url);
+      const dest = d.redirectInfo?.get(url); if (dest) push(dest);
+      const tr = d.trackerInfo?.get(url); if (tr?.realUrl) push(tr.realUrl);
+      for (const hop of (resultMap.get(url)?.redirectChain || [])) push(hop);
+      const seen = new Set();
+      return acc.filter(s => !seen.has(s.label) && seen.add(s.label));
+    };
     const urlItemsHtml = d.allUrls.map(url => {
       const r           = resultMap.get(url);
       const isShortener  = d.shorteners?.includes(url);
       const tracker     = d.trackerInfo?.get(url);
       const spoofing    = d.spoofedUrls?.get(url);
       const redirectReal = d.redirectInfo?.get(url);
+      const heurSignals = collectHeurReport(url);
       let cls, verdictText, extra = "";
       if (spoofing) {
         cls = "url-danger";
@@ -1753,6 +1967,14 @@ function buildHtmlReport(d) {
         cls = "url-safe"; verdictText = "✓ Sin amenazas";
       } else {
         cls = "url-unknown"; verdictText = "? Sin verificar";
+      }
+      if (heurSignals.length && (cls === "url-safe" || cls === "url-unknown")) {
+        cls = "url-warn";
+        verdictText = "⚡ Limpia en listas negras, pero con señales heurísticas";
+      }
+      if (heurSignals.length) {
+        extra += `<ul style="margin:6px 0 0;padding-left:16px;font-size:11px;color:#6b7280;line-height:1.5">` +
+          heurSignals.map(s => `<li>+${s.score} · ${esc(s.label)}</li>`).join("") + `</ul>`;
       }
       const colors = {
         "url-danger":  { border:"#fca5a5", bg:"#fef2f2", vc:"#dc2626" },
@@ -1832,12 +2054,28 @@ function downloadTextReport() {
   URL.revokeObjectURL(a.href);
 }
 
-function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo, evasionTechniques = [], urlError = null) {
+function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToTracker, spoofedUrls, redirectInfo, evasionTechniques = [], urlError = null, urlHeuristics = null) {
   // Mapa rápido: url → resultado del servidor
   const resultMap = new Map(
     (urlResult?.results ?? allUrls.map(u => ({ url: u, verdict: "unknown", threats: [] })))
       .map(r => [r.url, r])
   );
+
+  // Reúne las señales heurísticas de una URL y de sus destinos asociados
+  // (redirect ?url=, tracker decodificado, saltos HTTP del servidor), para
+  // que el email incrustado o el dominio joven del destino afloren en la
+  // fila de la URL visible. Devuelve la lista deduplicada por etiqueta.
+  function collectHeur(url) {
+    if (!urlHeuristics?.perUrl) return [];
+    const acc = [];
+    const push = (u) => { const h = urlHeuristics.perUrl.get(u); if (h) acc.push(...h.signals); };
+    push(url);
+    const dest = redirectInfo?.get(url); if (dest) push(dest);
+    const tr = trackerInfo?.get(url); if (tr?.realUrl) push(tr.realUrl);
+    for (const hop of (resultMap.get(url)?.redirectChain || [])) push(hop);
+    const seen = new Set();
+    return acc.filter(s => !seen.has(s.label) && seen.add(s.label));
+  }
   // Agregar resultados de URLs reales decodificadas (si las hay)
   if (urlResult?.results) {
     for (const r of urlResult.results) {
@@ -1859,14 +2097,20 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
   const hasTrackers   = trackerInfo.size > 0;
   const hasShorteners = shorteners.length > 0;
   const hasRedirects  = redirectInfo && redirectInfo.size > 0;
+  let hasHeuristics   = false;
+  if (urlHeuristics?.perUrl) {
+    for (const e of urlHeuristics.perUrl.values()) {
+      if (e.signals.length) { hasHeuristics = true; break; }
+    }
+  }
 
   const state = totalDanger > 0 ? "danger"
-              : hasShorteners || hasTrackers || hasRedirects ? "warn"
+              : hasShorteners || hasTrackers || hasRedirects || hasHeuristics ? "warn"
               : (urlResult?.verdict === "safe" ? "safe" : "warn");
 
   const label = totalDanger > 0
     ? `${totalDanger} PELIGROSA${totalDanger > 1 ? "S" : ""}`
-    : (urlResult?.verdict === "safe" && !hasTrackers && !hasShorteners && !hasRedirects ? "LIMPIAS" : "AVISO");
+    : (urlResult?.verdict === "safe" && !hasTrackers && !hasShorteners && !hasRedirects && !hasHeuristics ? "LIMPIAS" : "AVISO");
 
   const section = document.createElement("div");
   section.className = `result-section ${state}`;
@@ -1936,6 +2180,15 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
     } else {
       cls = "url-unknown";
       verdictText = "? Sin verificar";
+    }
+
+    // Señales heurísticas: si la URL salió "limpia"/"sin verificar" en las
+    // listas negras pero la heurística encontró señales, se degrada a aviso
+    // para que NO se muestre como segura.
+    const heurSignals = collectHeur(url);
+    if (heurSignals.length && (cls === "url-safe" || cls === "url-unknown")) {
+      cls = "url-warn";
+      verdictText = "⚡ Sin coincidencias en listas negras, pero con señales heurísticas de phishing";
     }
 
     let realUrlBlock = "";
@@ -2042,9 +2295,32 @@ function buildUrlSection(urlResult, allUrls, shorteners, trackerInfo, realUrlToT
         </div>`;
     }
 
+    let heurBlock = "";
+    if (heurSignals.length) {
+      const heurMax = heurSignals.reduce((m, s) => Math.max(m, s.score), 0);
+      const level = heurMax >= 45 ? "ALTO" : heurMax >= 25 ? "MODERADO" : "BAJO";
+      const lvlColor = heurMax >= 45 ? "var(--danger)" : "var(--warn)";
+      heurBlock = `
+        <div style="margin-top:8px;padding:8px 10px;border-radius:6px;
+                    border:1px solid var(--border);background:rgba(0,0,0,.25)">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                      margin-bottom:4px;letter-spacing:.5px;text-transform:uppercase">
+            Análisis heurístico (sin listas negras)
+            <span style="float:right;color:${lvlColor};font-weight:700">Indicio: ${level}</span>
+          </div>
+          ${heurSignals.map(s => `
+            <div style="display:flex;align-items:baseline;gap:8px;margin-top:3px">
+              <span style="font-family:var(--mono);font-size:10px;flex-shrink:0;
+                           color:${s.score >= 45 ? "var(--danger)" : "var(--warn)"}">+${s.score}</span>
+              <span style="font-size:12px;color:var(--text)">${esc(s.label)}</span>
+            </div>`).join("")}
+        </div>`;
+    }
+
     return `<div class="url-item ${cls}">
               <div class="url-text">${esc(url)}</div>
               <div class="url-verdict">${esc(verdictText)}</div>
+              ${heurBlock}
               ${realUrlBlock}
               ${redirectBlock}
               ${serverChainBlock}
