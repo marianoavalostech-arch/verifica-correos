@@ -1743,6 +1743,76 @@ function buildBodySection(b) {
 //  Generación de informes
 // ═══════════════════════════════════════════════════════
 
+// ───────────────────────────────────────────────────────
+//  Contenido gerencial compartido (no técnico)
+// ───────────────────────────────────────────────────────
+// Las 4 preguntas/respuestas en lenguaje de negocio se reutilizan en la
+// captura del sandbox y en los informes descargables (.txt y HTML), para que
+// la explicación de "qué hace la página y qué pasa si se accede" sea idéntica
+// en todos lados.
+const MANAGERIAL_ROWS = [
+  ["¿Qué es esta página, en palabras simples?",
+   "Es la página real que se esconde detrás de un enlace acortado o disfrazado " +
+   "(del tipo que suele llegar por correo). Está construida para parecer confiable " +
+   "—a veces muestra una falsa “verificación de seguridad” o un candado— de modo que " +
+   "la persona baje la guardia y crea que está en un sitio legítimo."],
+  ["¿Qué busca realmente?",
+   "Engañar a la persona para que entregue información de valor: usuario y contraseña, " +
+   "datos bancarios o de tarjeta, códigos de acceso; o lograr que descargue un archivo. " +
+   "Con solo abrirla, también confirma a los atacantes que la dirección de correo está " +
+   "activa, lo que suele derivar en más intentos de fraude."],
+  ["¿Qué pasa si se accede?",
+   "Abrir el enlace ya le indica al atacante que la víctima “picó”. Si además se escribe " +
+   "cualquier dato o se hace clic en los botones de la página, se pueden entregar " +
+   "contraseñas, dinero o accesos a sistemas de la empresa. En algunos casos la página " +
+   "intenta cargar contenido dañino en el equipo sin pedir permiso."],
+  ["¿Qué conviene hacer?",
+   "No abrir el enlace, no ingresar datos y no reenviarlo. Reportarlo al área de IT / " +
+   "seguridad. Si alguien ya ingresó datos: cambiar de inmediato las contraseñas afectadas, " +
+   "avisar a seguridad y, si hubo datos bancarios, contactar al banco."],
+];
+
+function managerialLevel(d) {
+  const st = d.urlState || d.globalState;
+  return st === "danger" ? "alto" : st === "warn" ? "medio" : "bajo";
+}
+
+function managerialShouldShow(d) {
+  const st = d.urlState || d.globalState;
+  return (d.allUrls?.length > 0) && (st === "danger" || st === "warn");
+}
+
+function managerialFacts(level) {
+  const riesgo = level === "alto" ? "ALTO" : level === "medio" ? "MEDIO" : "BAJO";
+  const veredictoLinea = level === "alto"
+    ? "El análisis detectó enlaces PELIGROSOS en este correo. Abajo se explica, sin tecnicismos, qué hacen esas páginas y qué pasa si alguien las abre."
+    : level === "medio"
+      ? "El análisis detectó enlaces SOSPECHOSOS (acortados, disfrazados o con redirecciones) en este correo. Abajo se explica, sin tecnicismos, a qué se expone quien los abra."
+      : "Un enlace puede parecer inofensivo y no serlo. Abajo, en lenguaje simple, qué buscan estas páginas y cómo actuar ante la duda.";
+  return { riesgo, veredictoLinea, filas: MANAGERIAL_ROWS };
+}
+
+function managerialReportText(d) {
+  if (!managerialShouldShow(d)) return "";
+  const { riesgo, veredictoLinea, filas } = managerialFacts(managerialLevel(d));
+  let t = `${"─".repeat(58)}\nEXPLICACIÓN PARA DIRECCIÓN (no técnica) — Riesgo: ${riesgo}\n\n${veredictoLinea}\n\n`;
+  filas.forEach(([q, a]) => { t += `  ${q}\n  ${a}\n\n`; });
+  return t;
+}
+
+function managerialReportHtml(d) {
+  if (!managerialShouldShow(d)) return "";
+  const { riesgo, veredictoLinea, filas } = managerialFacts(managerialLevel(d));
+  const color = riesgo === "ALTO" ? "#dc2626" : riesgo === "MEDIO" ? "#d97706" : "#6b7280";
+  let body = `<p style="font-size:13px;color:#374151;line-height:1.55;margin-bottom:10px">${esc(veredictoLinea)}</p>`;
+  body += filas.map(([q, a]) => `
+    <div style="padding:8px 0;border-bottom:1px solid #f3f4f6">
+      <div style="font-size:13px;font-weight:700;color:#111;margin-bottom:3px">${esc(q)}</div>
+      <div style="font-size:13px;color:#6b7280;line-height:1.55">${esc(a)}</div>
+    </div>`).join("");
+  return _buildHtmlSection("🧭 Qué significa esto · explicación para dirección", "RIESGO " + riesgo, color, body);
+}
+
 function buildTextReport(d) {
   const ts = new Date().toLocaleString("es-AR", {
     day:"2-digit", month:"2-digit", year:"numeric",
@@ -1842,6 +1912,8 @@ Riesgo estimado: ${d.riskScore} / 100
       txt += "\n";
     });
   }
+
+  txt += managerialReportText(d);
 
   txt += `${"═".repeat(58)}\nNOTA IMPORTANTE:\n${STD_NOTE}\n\nVerifica Correos — herramienta gratuita y open source\nhttps://verifica-correos.netlify.app/\n`;
   return txt;
@@ -1996,6 +2068,8 @@ function buildHtmlReport(d) {
     sectionsHtml += _buildHtmlSection(`🔗 URLs (${d.allUrls.length})`, urlLabel, urlColor, urlItemsHtml);
   }
 
+  sectionsHtml += managerialReportHtml(d);
+
   // Construir el HTML del informe con concatenación de strings para evitar problemas con backticks
   const b = [];
   b.push('<!DOCTYPE html><html lang="es"><head>');
@@ -2072,6 +2146,49 @@ async function sandboxPost(payload) {
   return { ok: resp.ok, status: resp.status, data };
 }
 
+// ───────────────────────────────────────────────────────
+//  Informe gerencial (no técnico) del destino final
+// ───────────────────────────────────────────────────────
+// Traduce el resultado del sandbox a lenguaje de negocio para que una
+// persona sin perfil técnico (dirección, gerencia, usuario final) entienda
+// QUÉ es realmente la página y QUÉ pasa si se accede. El texto se adapta al
+// veredicto de urlscan.io pero parte de un principio prudente: un enlace que
+// llega disfrazado/acortado y termina en una página de "verificación" se trata
+// como una trampa hasta demostrar lo contrario.
+function buildManagerialExplanation(d) {
+  const score = Number(d.score ?? 0);
+  const riesgo = d.malicious ? "ALTO"
+               : score > 0   ? "MEDIO"
+               :               "A CONFIRMAR";
+  const rColor = d.malicious ? "var(--danger)"
+               : score > 0   ? "var(--warn)"
+               :               "var(--muted)";
+
+  const veredictoLinea = d.malicious
+    ? "El análisis automático en un entorno aislado clasificó este destino como MALICIOSO."
+    : score > 0
+      ? "El análisis automático detectó señales sospechosas, aunque no un veredicto malicioso definitivo."
+      : "El análisis automático no emitió un veredicto malicioso. Importante: esto NO significa que sea seguro; muchas páginas fraudulentas todavía no están catalogadas.";
+
+  const filas = MANAGERIAL_ROWS;
+
+  return `
+    <div style="margin-top:12px;padding:12px 14px;border-radius:8px;
+                border:1px solid var(--border);background:rgba(0,0,0,.22)">
+      <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                  text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">
+        Informe para dirección · explicación no técnica
+        <span style="float:right;color:${rColor};font-weight:700">Riesgo: ${riesgo}</span>
+      </div>
+      <div style="font-size:12px;color:var(--text);margin-bottom:10px">${esc(veredictoLinea)}</div>
+      ${filas.map(([q, a]) => `
+        <div style="margin-top:8px">
+          <div style="font-size:12px;font-weight:700;color:var(--text)">${esc(q)}</div>
+          <div style="font-size:12px;color:var(--muted);line-height:1.5;margin-top:2px">${esc(a)}</div>
+        </div>`).join("")}
+    </div>`;
+}
+
 function renderSandboxResult(box, d) {
   const vColor = d.malicious ? "var(--danger)" : "var(--accent)";
   const vText  = d.malicious
@@ -2094,6 +2211,7 @@ function renderSandboxResult(box, d) {
               style="color:var(--accent)">Ver informe completo en urlscan.io ↗</a>
          </div>`
       : ""}
+    ${buildManagerialExplanation(d)}
     <div style="margin-top:6px;font-size:10px;color:var(--muted)">
       La imagen se generó en un entorno remoto aislado; el enlace nunca se abrió en tu equipo.
     </div>`;
