@@ -1657,13 +1657,9 @@ function renderResults({ senderResult, subjectResult, bodyResult, urlResult, url
     <button class="btn-report-html" id="viewReportBtn" type="button">
       📄 Ver informe completo
     </button>
-    <button class="btn-report-txt" id="downloadReportBtn" type="button">
-      ⬇ Descargar .txt
-    </button>
   `;
   container.appendChild(reportActions);
   document.getElementById("viewReportBtn").addEventListener("click", openHtmlReport);
-  document.getElementById("downloadReportBtn").addEventListener("click", downloadTextReport);
 }
 
 function buildSubjectSection(s) {
@@ -1792,14 +1788,6 @@ function managerialFacts(level) {
   return { riesgo, veredictoLinea, filas: MANAGERIAL_ROWS };
 }
 
-function managerialReportText(d) {
-  if (!managerialShouldShow(d)) return "";
-  const { riesgo, veredictoLinea, filas } = managerialFacts(managerialLevel(d));
-  let t = `${"─".repeat(58)}\nEXPLICACIÓN PARA DIRECCIÓN (no técnica) — Riesgo: ${riesgo}\n\n${veredictoLinea}\n\n`;
-  filas.forEach(([q, a]) => { t += `  ${q}\n  ${a}\n\n`; });
-  return t;
-}
-
 function managerialReportHtml(d) {
   if (!managerialShouldShow(d)) return "";
   const { riesgo, veredictoLinea, filas } = managerialFacts(managerialLevel(d));
@@ -1811,112 +1799,6 @@ function managerialReportHtml(d) {
       <div style="font-size:13px;color:#6b7280;line-height:1.55">${esc(a)}</div>
     </div>`).join("");
   return _buildHtmlSection("🧭 Qué significa esto · explicación para dirección", "RIESGO " + riesgo, color, body);
-}
-
-function buildTextReport(d) {
-  const ts = new Date().toLocaleString("es-AR", {
-    day:"2-digit", month:"2-digit", year:"numeric",
-    hour:"2-digit", minute:"2-digit"
-  });
-  const globalLabels = {
-    danger: "PELIGROSO — Se detectaron señales de peligro",
-    warn:   "ALERTA — Hay señales que requieren atención",
-    safe:   "LIMPIO — Sin amenazas detectadas",
-  };
-  let txt =
-`VERIFICA CORREOS — INFORME DE ANÁLISIS
-${"═".repeat(58)}
-Fecha: ${ts}
-Herramienta: https://verifica-correos.netlify.app/
-
-VEREDICTO GLOBAL: ${globalLabels[d.globalState] || d.globalState.toUpperCase()}
-Riesgo estimado: ${d.riskScore} / 100
-
-`;
-
-  if (d.senderResult) {
-    const s = d.senderResult;
-    const sl = { danger:"PELIGROSO", warn:"ALERTA", safe:"LIMPIO" }[s.state] || s.state.toUpperCase();
-    txt += `${"─".repeat(58)}\nREMITENTE\nDirección: ${s.email}\nEstado: ${sl}\n\n`;
-    if (s.stats) s.stats.forEach(([l, v]) => { txt += `  ${(l + ":").padEnd(16)} ${v}\n`; });
-    if (s.issues.length) {
-      txt += "\nProblemas detectados:\n";
-      s.issues.forEach(i => { txt += `  • ${i}\n`; });
-    }
-    txt += "\n";
-  }
-
-  if (d.subjectResult && d.subjectResult.issues.length > 0) {
-    const s = d.subjectResult;
-    const sl = { danger:"ALERTA", warn:"AVISO", safe:"LIMPIO" }[s.state] || s.state.toUpperCase();
-    txt += `${"─".repeat(58)}\nASUNTO\nEstado: ${sl}\n\nProblemas detectados:\n`;
-    s.issues.forEach(i => { txt += `  • ${i}\n`; });
-    txt += "\n";
-  }
-
-  if (d.bodyResult) {
-    const b = d.bodyResult;
-    const bl = { danger:"SOSPECHOSO", warn:"ALERTA", safe:"LIMPIO" }[b.state] || b.state.toUpperCase();
-    txt += `${"─".repeat(58)}\nCUERPO DEL CORREO\nEstado: ${bl}\n`;
-    if (b.issues.length) {
-      txt += "\nSeñales detectadas:\n";
-      b.issues.forEach(i => { txt += `  • [${i.label}]\n    ${i.desc}\n`; });
-    } else {
-      txt += "  ✓ No se detectaron patrones sospechosos.\n";
-    }
-    txt += "\n";
-  }
-
-  if (d.allUrls && d.allUrls.length > 0) {
-    const resultMap = new Map((d.urlResult?.results ?? []).map(r => [r.url, r]));
-    const collectHeurTxt = (url) => {
-      if (!d.urlHeuristics?.perUrl) return [];
-      const acc = [];
-      const push = (u) => { const h = d.urlHeuristics.perUrl.get(u); if (h) acc.push(...h.signals); };
-      push(url);
-      const dest = d.redirectInfo?.get(url); if (dest) push(dest);
-      const tr = d.trackerInfo?.get(url); if (tr?.realUrl) push(tr.realUrl);
-      for (const hop of (resultMap.get(url)?.redirectChain || [])) push(hop);
-      const seen = new Set();
-      return acc.filter(s => !seen.has(s.label) && seen.add(s.label));
-    };
-    txt += `${"─".repeat(58)}\nURLs ANALIZADAS (${d.allUrls.length})\n\n`;
-    d.allUrls.forEach(url => {
-      const r          = resultMap.get(url);
-      const isShortener = d.shorteners?.includes(url);
-      const tracker    = d.trackerInfo?.get(url);
-      const spoofing   = d.spoofedUrls?.get(url);
-      const redirectReal = d.redirectInfo?.get(url);
-      const heurSignals = collectHeurTxt(url);
-      let verdictText;
-      if (spoofing) {
-        verdictText = `[FALSIFICADA] Destino real: "${spoofing.realHost}" — no "${spoofing.fakeHost}"`;
-      } else if (r?.verdict === "dangerous") {
-        const threats = (r.threats || []).map(t => THREAT_LABELS[t] || t).join(", ");
-        verdictText = "[AMENAZA] " + (threats || "Detectada por sistemas antimalware");
-      } else if (tracker) {
-        verdictText = `[TRACKING] ${tracker.name}${tracker.realUrl ? `\n    Destino real: ${tracker.realUrl}` : " (destino no decodificable)"}`;
-      } else if (redirectReal) {
-        verdictText = `[REDIRECT] Destino: ${redirectReal}`;
-      } else if (isShortener) {
-        verdictText = "[ACORTADOR] Destino real oculto";
-      } else if (heurSignals.length) {
-        verdictText = "[HEURÍSTICA] Limpia en listas negras, pero con señales de phishing";
-      } else if (r?.verdict === "safe") {
-        verdictText = "[LIMPIA] Sin amenazas conocidas";
-      } else {
-        verdictText = "[SIN VERIFICAR]";
-      }
-      txt += `  ${url}\n  → ${verdictText}\n`;
-      heurSignals.forEach(s => { txt += `      · +${s.score} ${s.label}\n`; });
-      txt += "\n";
-    });
-  }
-
-  txt += managerialReportText(d);
-
-  txt += `${"═".repeat(58)}\nNOTA IMPORTANTE:\n${STD_NOTE}\n\nVerifica Correos — herramienta gratuita y open source\nhttps://verifica-correos.netlify.app/\n`;
-  return txt;
 }
 
 function _buildHtmlSection(title, badge, color, bodyHtml) {
@@ -2116,18 +1998,7 @@ function openHtmlReport() {
   win.document.close();
 }
 
-function downloadTextReport() {
-  if (!lastAnalysisData) return;
-  const txt = buildTextReport(lastAnalysisData);
-  const blob = new Blob([txt], { type: "text/plain;charset=utf-8" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "informe-verifica-correos-" + new Date().toISOString().slice(0,10) + ".txt";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(a.href);
-}
+
 
 // ═══════════════════════════════════════════════════════
 //  Captura en sandbox remoto (urlscan.io) — opt-in y manual
@@ -2146,46 +2017,36 @@ async function sandboxPost(payload) {
   return { ok: resp.ok, status: resp.status, data };
 }
 
-// ───────────────────────────────────────────────────────
-//  Informe gerencial (no técnico) del destino final
-// ───────────────────────────────────────────────────────
-// Traduce el resultado del sandbox a lenguaje de negocio para que una
-// persona sin perfil técnico (dirección, gerencia, usuario final) entienda
-// QUÉ es realmente la página y QUÉ pasa si se accede. El texto se adapta al
-// veredicto de urlscan.io pero parte de un principio prudente: un enlace que
-// llega disfrazado/acortado y termina en una página de "verificación" se trata
-// como una trampa hasta demostrar lo contrario.
-function buildManagerialExplanation(d) {
-  const score = Number(d.score ?? 0);
-  const riesgo = d.malicious ? "ALTO"
-               : score > 0   ? "MEDIO"
-               :               "A CONFIRMAR";
-  const rColor = d.malicious ? "var(--danger)"
-               : score > 0   ? "var(--warn)"
-               :               "var(--muted)";
 
+// Explicación NO técnica de un informe de urlscan.io a partir de su veredicto
+// (malicioso / score / URL final). Reutiliza las preguntas de MANAGERIAL_ROWS.
+function buildUrlscanPlainExplanation(d) {
+  const score  = Number(d.score ?? 0);
+  const riesgo = d.malicious ? "ALTO" : score > 0 ? "MEDIO" : "A CONFIRMAR";
+  const rColor = d.malicious ? "var(--danger)" : score > 0 ? "var(--warn)" : "var(--muted)";
   const veredictoLinea = d.malicious
-    ? "El análisis automático en un entorno aislado clasificó este destino como MALICIOSO."
+    ? "urlscan.io clasificó este destino como MALICIOSO. Tratalo como una trampa: no lo abras ni cargues datos."
     : score > 0
-      ? "El análisis automático detectó señales sospechosas, aunque no un veredicto malicioso definitivo."
-      : "El análisis automático no emitió un veredicto malicioso. Importante: esto NO significa que sea seguro; muchas páginas fraudulentas todavía no están catalogadas.";
-
-  const filas = MANAGERIAL_ROWS;
-
+      ? "urlscan.io detectó señales sospechosas en este destino, aunque sin un veredicto malicioso definitivo. Conviene tratarlo con desconfianza."
+      : "urlscan.io no emitió un veredicto malicioso. Importante: esto NO garantiza que sea seguro; muchas páginas fraudulentas todavía no están catalogadas.";
   return `
-    <div style="margin-top:12px;padding:12px 14px;border-radius:8px;
-                border:1px solid var(--border);background:rgba(0,0,0,.22)">
+    <div style="padding:12px 14px;border-radius:8px;
+                border:1px solid var(--border);background:rgba(0,0,0,.28)">
       <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
                   text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">
-        Informe para dirección · explicación no técnica
+        Explicación no técnica del informe
         <span style="float:right;color:${rColor};font-weight:700">Riesgo: ${riesgo}</span>
       </div>
+      ${d.finalUrl ? `<div class="url-text" style="margin-bottom:6px">Página analizada: ${esc(d.finalUrl)}</div>` : ""}
       <div style="font-size:12px;color:var(--text);margin-bottom:10px">${esc(veredictoLinea)}</div>
-      ${filas.map(([q, a]) => `
+      ${MANAGERIAL_ROWS.map(([q, a]) => `
         <div style="margin-top:8px">
           <div style="font-size:12px;font-weight:700;color:var(--text)">${esc(q)}</div>
           <div style="font-size:12px;color:var(--muted);line-height:1.5;margin-top:2px">${esc(a)}</div>
         </div>`).join("")}
+      ${d.reportUrl ? `<div style="margin-top:8px;font-size:11px">
+           <a href="${esc(d.reportUrl)}" target="_blank" rel="noopener noreferrer"
+              style="color:var(--accent)">Ver informe técnico completo en urlscan.io ↗</a></div>` : ""}
     </div>`;
 }
 
@@ -2211,10 +2072,89 @@ function renderSandboxResult(box, d) {
               style="color:var(--accent)">Ver informe completo en urlscan.io ↗</a>
          </div>`
       : ""}
-    ${buildManagerialExplanation(d)}
+    <div class="urlscan-loader" style="margin-top:12px;padding:12px 14px;border-radius:8px;
+                border:1px solid var(--border);background:rgba(0,0,0,.22)">
+      <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                  text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+        Analizar un informe de urlscan.io (explicación no técnica)
+      </div>
+      <button type="button" class="btn-secondary urlscan-toggle"
+              style="font-size:11px;padding:6px 10px">
+        🔎 Pegar una URL de urlscan.io/result
+      </button>
+      <div class="urlscan-form" style="display:none;margin-top:8px">
+        <input type="url" class="urlscan-input" placeholder="https://urlscan.io/result/..."
+               style="width:100%;box-sizing:border-box;font-family:var(--mono);font-size:11px;
+                      padding:7px 9px;border-radius:6px;border:1px solid var(--border);
+                      background:rgba(0,0,0,.25);color:var(--text)">
+        <div class="urlscan-msg" style="font-size:10px;color:var(--muted);margin-top:4px"></div>
+        <button type="button" class="btn-secondary urlscan-open"
+                style="font-size:11px;padding:6px 10px;margin-top:6px">
+          Analizar y explicar
+        </button>
+        <div class="urlscan-result" style="margin-top:8px"></div>
+      </div>
+    </div>
     <div style="margin-top:6px;font-size:10px;color:var(--muted)">
       La imagen se generó en un entorno remoto aislado; el enlace nunca se abrió en tu equipo.
     </div>`;
+
+  // Botón + campo: el usuario pega una URL de urlscan.io/result, consultamos su
+  // informe (vía /sandbox action:result) y mostramos una explicación NO técnica.
+  const toggle = box.querySelector(".urlscan-toggle");
+  const form   = box.querySelector(".urlscan-form");
+  const input  = box.querySelector(".urlscan-input");
+  const openBt = box.querySelector(".urlscan-open");
+  const msg    = box.querySelector(".urlscan-msg");
+  const result = box.querySelector(".urlscan-result");
+  if (toggle && form) {
+    toggle.addEventListener("click", () => {
+      const open = form.style.display === "none";
+      form.style.display = open ? "block" : "none";
+      if (open) input?.focus();
+    });
+  }
+  const UUID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+  let analyzing = false;
+  const analyzeUrlscan = async () => {
+    if (analyzing) return;
+    const raw = (input?.value || "").trim();
+    const m = /^https:\/\/urlscan\.io\/result\//i.test(raw) ? raw.match(UUID_RE) : null;
+    if (!m) {
+      if (msg) { msg.style.color = "var(--danger)"; msg.textContent = "Pegá una URL válida de urlscan.io/result/…"; }
+      return;
+    }
+    const uuid = m[1].toLowerCase();
+    analyzing = true;
+    if (openBt) { openBt.disabled = true; openBt.style.opacity = ".6"; }
+    if (result) result.innerHTML = "";
+    try {
+      let done = null;
+      for (let i = 0; i < 6; i++) {
+        if (msg) { msg.style.color = "var(--muted)"; msg.textContent = i === 0 ? "Consultando el informe en urlscan.io…" : `Aún procesando… (intento ${i + 1})`; }
+        const res = await sandboxPost({ action: "result", uuid });
+        if (res.data?.status === "done") { done = res.data; break; }
+        if (res.data?.error) {
+          if (msg) { msg.style.color = "var(--danger)"; msg.textContent = "✕ " + res.data.error; }
+          analyzing = false; if (openBt) { openBt.disabled = false; openBt.style.opacity = ""; }
+          return;
+        }
+        await new Promise(r => setTimeout(r, 3500));
+      }
+      if (!done) {
+        if (msg) { msg.style.color = "var(--warn)"; msg.textContent = "⏱ El informe todavía se está procesando. Probá de nuevo en un momento."; }
+      } else {
+        if (msg) msg.textContent = "";
+        if (result) result.innerHTML = buildUrlscanPlainExplanation(done);
+      }
+    } catch {
+      if (msg) { msg.style.color = "var(--danger)"; msg.textContent = "✕ Error de red al consultar urlscan.io."; }
+    }
+    analyzing = false;
+    if (openBt) { openBt.disabled = false; openBt.style.opacity = ""; }
+  };
+  openBt?.addEventListener("click", analyzeUrlscan);
+  input?.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); analyzeUrlscan(); } });
 }
 
 async function runSandboxScan(btn) {
