@@ -155,11 +155,23 @@ export default async function handler(req) {
     const data = await resp.json().catch(() => null);
     if (!data) return json({ error: "Respuesta de urlscan ilegible." }, 502);
 
-    const finalUrl  = data?.page?.url || null;
-    const malicious = !!data?.verdicts?.overall?.malicious;
-    const score     = Number(data?.verdicts?.overall?.score ?? 0);
-    const reportUrl = data?.task?.reportURL || null;
-    const shotUrl   = data?.task?.screenshotURL || null;
+    const page    = data?.page || {};
+    const task    = data?.task || {};
+    const lists   = data?.lists || {};
+    const overall = data?.verdicts?.overall || {};
+
+    const finalUrl     = page.url || null;
+    const submittedUrl = task.url || null;
+    const malicious = !!overall.malicious;
+    const score     = Number(overall.score ?? 0);
+    const reportUrl = task.reportURL || null;
+    const shotUrl   = task.screenshotURL || null;
+    const brands    = Array.isArray(overall.brands)
+      ? overall.brands.map(b => (b && (b.name || b.key)) || b).filter(x => typeof x === "string")
+      : [];
+    const domains   = Array.isArray(lists.domains) ? lists.domains.slice(0, 40) : [];
+    const countries = Array.isArray(lists.countries) ? lists.countries : [];
+    const ipCount   = Array.isArray(lists.ips) ? lists.ips.length : 0;
 
     // Descargar la captura en el servidor y devolverla como data URL base64.
     let screenshot = null;
@@ -175,7 +187,15 @@ export default async function handler(req) {
       } catch { /* sin captura → screenshot queda null */ }
     }
 
-    return json({ status: "done", finalUrl, malicious, score, screenshot, reportUrl });
+    return json({
+      status: "done",
+      finalUrl, submittedUrl, malicious, score, screenshot, reportUrl,
+      brands, domains, countries, ipCount,
+      title: page.title || null,
+      server: page.server || null,
+      apexDomain: page.apexDomain || null,
+      umbrellaRank: page.umbrellaRank ?? null,
+    });
   }
 
   return json({ error: "action debe ser 'submit' o 'result'." }, 400);

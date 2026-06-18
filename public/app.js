@@ -2018,38 +2018,93 @@ async function sandboxPost(payload) {
 }
 
 
-// Explicación NO técnica de un informe de urlscan.io a partir de su veredicto
-// (malicioso / score / URL final). Reutiliza las preguntas de MANAGERIAL_ROWS.
+// Explicación NO técnica construida a partir de las SEÑALES REALES del informe
+// de urlscan.io (URL enviada vs. destino final, correo incrustado, captcha
+// falso, rastreadores, dominio/reputación, marcas suplantadas, veredicto…).
+// No es texto fijo: cada hallazgo aparece solo si está presente en el informe.
 function buildUrlscanPlainExplanation(d) {
-  const score  = Number(d.score ?? 0);
-  const riesgo = d.malicious ? "ALTO" : score > 0 ? "MEDIO" : "A CONFIRMAR";
-  const rColor = d.malicious ? "var(--danger)" : score > 0 ? "var(--warn)" : "var(--muted)";
+  const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; } };
+  const subHost = host(d.submittedUrl);
+  const finHost = host(d.finalUrl);
+  const domains = Array.isArray(d.domains) ? d.domains : [];
+  const score   = Number(d.score ?? 0);
+
+  const findings = [];
+  let strong = 0;
+
+  const email = (d.submittedUrl || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  if (email) { strong++; findings.push(["Apunta a una persona/empresa concreta",
+    `El enlace lleva incrustado el correo ${email[0]}. Es un ataque dirigido: con solo abrirlo, quien está detrás confirma que esa casilla existe y está activa, lo que suele derivar en más intentos.`]); }
+
+  if (subHost && finHost && subHost !== finHost) { strong++; findings.push(["Oculta a dónde lleva realmente",
+    `Lo que se comparte es “${subHost}”, pero en realidad redirige a “${finHost}”. Disfrazar el destino con un enlace acortado es una táctica típica para que la persona no vea el sitio real.`]); }
+  else if (subHost && /(shortlink|short-link|bit\.ly|tinyurl|cutt\.ly|t\.co|is\.gd|rb\.gy|acortar)/i.test(subHost)) {
+    findings.push(["Enlace acortado", `Se usa un acortador (“${subHost}”) que esconde la dirección real del destino.`]); }
+
+  if (domains.some(x => /challenges\.cloudflare\.com|turnstile|hcaptcha|recaptcha/i.test(x))) { strong++; findings.push(["Falsa “verificación de seguridad”",
+    "Antes de mostrar nada, la página pone un captcha o “control de seguridad”. Los fraudes lo usan para parecer confiables y para frenar a los sistemas automáticos que detectan phishing."]); }
+
+  if (d.title && /seguridad|cyber|cibers|threat|amenaz|verific|check|link|enlace|test/i.test(d.title)) {
+    findings.push(["Se disfraza de herramienta de seguridad", `La página se titula “${d.title}”. Simula ser un “verificador de enlaces”, lo que da una falsa sensación de confianza.`]); }
+
+  if (domains.some(x => /google-analytics|googletagmanager/i.test(x))) {
+    findings.push(["Registra a quién entra", "Incluye rastreadores (Google Analytics / Tag Manager) que anotan quién visita la página y desde dónde."]); }
+
+  if ((d.brands || []).length) { strong++; findings.push(["Suplanta una marca conocida",
+    `urlscan asocia esta página con: ${(d.brands || []).join(", ")}.`]); }
+
+  if (d.apexDomain) {
+    const rep = (d.umbrellaRank && d.umbrellaRank > 100000) ? ", un dominio de muy poco tráfico/baja reputación" : "";
+    const srv = d.server ? ` Está detrás de ${d.server}, que oculta el servidor real.` : "";
+    findings.push(["Destino real", `El contenido se sirve desde “${d.apexDomain}”${rep}.${srv}`]); }
+
+  // El nivel de riesgo prioriza nuestras señales reales por sobre el veredicto de urlscan.
+  const riesgo = d.malicious ? "ALTO"
+               : strong >= 2 ? "ALTO"
+               : (strong === 1 || score > 0) ? "MEDIO"
+               : findings.length ? "A REVISAR"
+               : "A CONFIRMAR";
+  const rColor = riesgo === "ALTO" ? "var(--danger)"
+               : (riesgo === "MEDIO" || riesgo === "A REVISAR") ? "var(--warn)"
+               : "var(--muted)";
+
   const veredictoLinea = d.malicious
-    ? "urlscan.io clasificó este destino como MALICIOSO. Tratalo como una trampa: no lo abras ni cargues datos."
-    : score > 0
-      ? "urlscan.io detectó señales sospechosas en este destino, aunque sin un veredicto malicioso definitivo. Conviene tratarlo con desconfianza."
-      : "urlscan.io no emitió un veredicto malicioso. Importante: esto NO garantiza que sea seguro; muchas páginas fraudulentas todavía no están catalogadas.";
+    ? "urlscan.io lo marcó como MALICIOSO. Tratalo como una trampa: no lo abras ni cargues datos."
+    : strong >= 2
+      ? "urlscan.io no lo clasificó, pero el informe muestra señales claras de phishing (abajo). Ojo: que no tenga veredicto NO significa que sea seguro."
+      : findings.length
+        ? "urlscan.io no emitió veredicto, pero el informe tiene señales que conviene revisar (abajo)."
+        : "urlscan.io no emitió un veredicto y el informe no muestra señales claras. Aun así, la ausencia de veredicto no garantiza que sea seguro.";
+
+  const accion = "No abrir el enlace, no ingresar datos y no reenviarlo. Reportarlo a IT / seguridad. Si alguien ya cargó datos: cambiar de inmediato las contraseñas afectadas, avisar a seguridad y, si hubo datos bancarios, contactar al banco.";
+
+  const filasHtml = findings.map(([t, txt]) => `
+        <div style="margin-top:8px">
+          <div style="font-size:12px;font-weight:700;color:var(--text)">• ${esc(t)}</div>
+          <div style="font-size:12px;color:var(--muted);line-height:1.5;margin-top:2px">${esc(txt)}</div>
+        </div>`).join("");
+
   return `
     <div style="padding:12px 14px;border-radius:8px;
                 border:1px solid var(--border);background:rgba(0,0,0,.28)">
       <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
                   text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">
-        Explicación no técnica del informe
+        Explicación no técnica · según el informe
         <span style="float:right;color:${rColor};font-weight:700">Riesgo: ${riesgo}</span>
       </div>
       ${d.finalUrl ? `<div class="url-text" style="margin-bottom:6px">Página analizada: ${esc(d.finalUrl)}</div>` : ""}
-      <div style="font-size:12px;color:var(--text);margin-bottom:10px">${esc(veredictoLinea)}</div>
-      ${MANAGERIAL_ROWS.map(([q, a]) => `
-        <div style="margin-top:8px">
-          <div style="font-size:12px;font-weight:700;color:var(--text)">${esc(q)}</div>
-          <div style="font-size:12px;color:var(--muted);line-height:1.5;margin-top:2px">${esc(a)}</div>
-        </div>`).join("")}
+      <div style="font-size:12px;color:var(--text);margin-bottom:6px">${esc(veredictoLinea)}</div>
+      ${findings.length ? `<div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+                  text-transform:uppercase;letter-spacing:.5px;margin-top:10px;margin-bottom:2px">Qué encontramos en el informe</div>${filasHtml}` : ""}
+      <div style="margin-top:10px">
+        <div style="font-size:12px;font-weight:700;color:var(--text)">¿Qué conviene hacer?</div>
+        <div style="font-size:12px;color:var(--muted);line-height:1.5;margin-top:2px">${esc(accion)}</div>
+      </div>
       ${d.reportUrl ? `<div style="margin-top:8px;font-size:11px">
            <a href="${esc(d.reportUrl)}" target="_blank" rel="noopener noreferrer"
               style="color:var(--accent)">Ver informe técnico completo en urlscan.io ↗</a></div>` : ""}
     </div>`;
 }
-
 function renderSandboxResult(box, d) {
   const vColor = d.malicious ? "var(--danger)" : "var(--accent)";
   const vText  = d.malicious
